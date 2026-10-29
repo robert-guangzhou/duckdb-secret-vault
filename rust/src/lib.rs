@@ -1,7 +1,7 @@
 //! secret_vault 加密核心(阶段一)。
 //!
 //! - 文件格式 v1(Dev Plan 3.2):40 字节头 + AES-256-GCM 密文‖tag
-//!   `magic "DSVLT\0\0" | version u16 BE | provider u8 | flags u8 | salt 16B | nonce 12B`
+//!   `magic "DSVLT\0\0\0" | version u16 BE | provider u8 | flags u8 | salt 16B | nonce 12B`
 //!   AAD = 40 字节头 + secret 名(防改名/调包)。
 //! - KeyProvider(Dev Plan 3.3):keyring(1)=OS keychain 主密钥;passphrase(2)=Argon2id
 //!   (m=64MiB,t=3,p=1,per-file salt);env(3)=SECRET_VAULT_KEY(base64 32B)。
@@ -80,10 +80,23 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8;
     match provider {
         PROVIDER_KEYRING => {
             // OS keychain 主密钥(salt 置零,主密钥直接作 AEAD key)。
+            // 首次使用自动生成随机 256-bit 主密钥并写入 keychain(Dev Plan 3.3);
             // 无 Secret Service(如 headless Linux)时明确报错,不静默降级(Dev Plan 六)。
-            let master = keyring::Entry::new("duckdb.secret_vault", "master")
-                .and_then(|e| e.get_secret())
+            let entry = keyring::Entry::new("duckdb.secret_vault", "master")
                 .map_err(|e| VaultError::KeyUnavailable(format!("keyring: {e}")))?;
+            let master = match entry.get_secret() {
+                Ok(m) => m,
+                Err(keyring::Error::NoEntry) => {
+                    // 首次使用:生成并持久化主密钥
+                    let mut mk = Zeroizing::new([0u8; KEY_LEN]);
+                    OsRng.fill_bytes(&mut mk);
+                    entry
+                        .set_secret(&mk)
+                        .map_err(|e| VaultError::KeyUnavailable(format!("keyring set: {e}")))?;
+                    mk.to_vec()
+                }
+                Err(e) => return Err(VaultError::KeyUnavailable(format!("keyring: {e}"))),
+            };
             if master.len() != KEY_LEN {
                 return Err(VaultError::KeyUnavailable(format!(
                     "keyring master key must be {KEY_LEN} bytes, found {}",
@@ -212,6 +225,9 @@ pub fn open(provider: u8, name: &str, blob: &[u8]) -> VaultResult<Vec<u8>> {
 pub struct VaultBuf {
     pub ptr: *mut u8,
     pub len: usize,
+    /// 分配容量:与 Rust 侧 Vec 真实 capacity 一致,vault_free_buf 依此释放;
+    /// 错值 = 分配器 UB(诚实审查 HIGH-1 修复)。C++ 侧必须原样回传。
+    pub cap: usize,
 }
 
 thread_local! {
@@ -237,6 +253,7 @@ fn wrap_result(r: VaultResult<Vec<u8>>, out: *mut VaultBuf) -> c_int {
             let mut v = std::mem::ManuallyDrop::new(v);
             unsafe {
                 (*out).len = v.len();
+                (*out).cap = v.capacity();
                 (*out).ptr = v.as_mut_ptr();
             }
             0
@@ -286,6 +303,8 @@ pub extern "C" fn vault_open(
 }
 
 /// 最近一次错误的描述(线程本地;不含密钥材料)。
+/// ⚠ 契约:返回指向线程本地缓冲的指针,下一次 vault_* 调用即失效——
+/// 调用方必须立即拷贝,不得跨调用持有(诚实审查 LOW-1)。
 #[no_mangle]
 pub extern "C" fn vault_last_error() -> *const c_char {
     thread_local! {
@@ -300,12 +319,12 @@ pub extern "C" fn vault_last_error() -> *const c_char {
     })
 }
 
-/// 释放 vault_seal/vault_open 返回的缓冲。
+/// 释放 vault_seal/vault_open 返回的缓冲。buf.len/buf.cap 必须原样传回,不得篡改。
 #[no_mangle]
 pub extern "C" fn vault_free_buf(buf: VaultBuf) {
-    if !buf.ptr.is_null() && buf.len > 0 {
+    if !buf.ptr.is_null() && buf.len > 0 && buf.cap >= buf.len {
         unsafe {
-            let _ = Vec::from_raw_parts(buf.ptr, buf.len, buf.len);
+            let _ = Vec::from_raw_parts(buf.ptr, buf.len, buf.cap);
         }
     }
 }
@@ -437,8 +456,18 @@ mod tests {
         assert!(!err.contains(&secret_b64), "error must not contain key material");
     }
 
-    // AES-256-GCM 官方向量(NIST AES-256-GCM PDF,Test Case 14/16 摘选)
-    // 注:aes-gcm crate 自身携带完整向量;此处做一层自造跨语言向量,供 C++ 侧比对。
+    // TP-05:zeroize 卫生钩子(C ABI 的 vault_zeroize_buf 是 C++ 侧清零入口)
+    #[test]
+    fn tp05_zeroize_buf_hook() {
+        let mut v = vec![0xABu8; 64];
+        let (ptr, len) = (v.as_mut_ptr(), v.len());
+        vault_zeroize_buf(ptr, len);
+        assert!(v.iter().all(|&b| b == 0), "vault_zeroize_buf must zero the whole buffer");
+        // 空指针/零长不崩溃
+        vault_zeroize_buf(std::ptr::null_mut(), 0);
+    }
+
+    // AES-256-GCM 官方向量(NIST AES-256-GCM PDF,Test Case 16)
     #[test]
     fn tp02_official_vector_tc16() {
         // NIST GCM Test Case 16:zero key/zero IV,空 PT,已知 tag

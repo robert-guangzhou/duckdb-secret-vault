@@ -10,7 +10,7 @@ require secret_vault
 query T
 SELECT secret_vault_version();
 ----
-0.1.0-spike
+0.1.0
 
 # 存储已注册并可显式指定
 statement ok

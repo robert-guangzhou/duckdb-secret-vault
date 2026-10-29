@@ -3,25 +3,39 @@
 DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密**存储
 (存储名 `local_encrypted`),替换默认 `local_file` 的明文落盘。
 
-> **当前状态:阶段零(spike)** —— SecretStorage 注册/CRUD/自动加载/脱敏接缝已打通,
-> 落盘暂为明文序列化;AES-256-GCM 加密、KeyProvider(keyring/passphrase/env)、
+> **当前状态:阶段零(spike)+ 阶段一(Rust 加密核心)完成**
+> —— SecretStorage 注册/CRUD/自动加载/脱敏接缝已打通并验证;加密核心
+> (AES-256-GCM、keyring/passphrase/env 三 provider、zeroize)已实现且单测全绿。
+> **C++ 存储层尚未接入加密**(落盘暂为明文序列化,阶段二接 `vault_seal/vault_open`),
 > 一次性封套 export/import 按计划分阶段接入。
 >
-> 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r4)
+> 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r5)
 
 ## 构建(minis Docker 模式,与 duckdb-nats-rw 同链路)
 
 ```bash
-# builder 容器内
-make build_debug          # 或 GEN=ninja make build
-build/debug/duckdb -c "LOAD 'build/debug/extension/secret_vault/secret_vault.duckdb_extension'; \
-  CREATE PERSISTENT SECRET t (TYPE vault_test, USER 'u', PASSWORD 'p') IN local_encrypted; \
+# secret-vault-builder 容器内(注意 PATH 需含 /usr/local/cargo/bin)
+cd /workspace
+make reldebug                # 实际 Makefile 目标:debug / reldebug / release
+build/reldebug/duckdb -unsigned -c "LOAD 'build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; \
+  CREATE PERSISTENT SECRET t IN local_encrypted (TYPE vault_test, USER 'u', PASSWORD 'p'); \
   SELECT name, storage, secret_string FROM duckdb_secrets();"
 ```
 
-## 阶段零出口判据(证据:tmp/secret-vault/phase0/)
+注意:dev 构建的扩展未签名,CLI 必须带 `-unsigned` 才能 LOAD。
 
-1. `local_encrypted` 存储注册成功,`CREATE PERSISTENT SECRET ... IN local_encrypted` 全链路可用;
+## Rust 核心单测(阶段一,与 DuckDB 构建无关)
+
+```bash
+cd rust
+cargo test                       # 单测 + FFI 回归 + 向量回归
+VECTORS_GEN=1 cargo test --test vectors   # 首次生成 tests/vectors.json 后提交
+```
+
+## 阶段零/一出口判据(证据:../../tmp/secret-vault/phase0,1/)
+
+1. `local_encrypted` 存储注册成功,`CREATE PERSISTENT SECRET ... IN local_encrypted`(IN 子句在括号选项之前)全链路可用;
 2. `SET default_secret_storage='local_encrypted'` 后无 IN 子句的 CREATE 正确路由;
-3. 新进程自动加载 vault 目录中的 secret,`duckdb_secrets()` 脱敏正常;
-4. keyring crate 在 minis 容器(Linux/无 dbus)的可用性结论。
+3. 新进程自动加载 vault 目录中的 secret,`duckdb_secrets()` 脱敏正常,文件权限 600;
+4. keyring crate 在 minis 容器(无 dbus)明确报错不降级;Windows 本机验证待办(需本地 Rust 工具链);
+5. cargo test 全绿(格式/AEAD 向量/AAD 绑定/nonce/口令/env 校验/zeroize 钩子/FFI 契约/向量回归)。
