@@ -89,9 +89,9 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8;
                 Err(keyring::Error::NoEntry) => {
                     // 首次使用:生成并持久化主密钥
                     let mut mk = Zeroizing::new([0u8; KEY_LEN]);
-                    OsRng.fill_bytes(&mut mk);
+                    OsRng.fill_bytes(&mut *mk);
                     entry
-                        .set_secret(&mk)
+                        .set_secret(&*mk)
                         .map_err(|e| VaultError::KeyUnavailable(format!("keyring set: {e}")))?;
                     mk.to_vec()
                 }
