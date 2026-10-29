@@ -31,7 +31,7 @@ run "1. version fn (corrosion+cbindgen+staticlib 链路)" \
   $DUCKDB -unsigned -noheader -list -c "${LOAD_CMD} SELECT secret_vault_version();"
 
 run "2. CREATE PERSISTENT SECRET ... IN local_encrypted" \
-  $DUCKDB -unsigned -noheader -list -c "${LOAD_CMD} CREATE PERSISTENT SECRET s1 (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'spike-mark-PLAIN') IN local_encrypted;"
+  $DUCKDB -unsigned -noheader -list -c "${LOAD_CMD} CREATE PERSISTENT SECRET s1 IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'spike-mark-PLAIN');"
 
 run "2b. vault 目录与文件形态" \
   bash -c "ls -la $HOME/.duckdb/stored_secrets_vault/ && stat -c '%a %n' $HOME/.duckdb/stored_secrets_vault/s1.duckdb_secret.vault"

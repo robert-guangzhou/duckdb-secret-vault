@@ -14,7 +14,7 @@ SELECT secret_vault_version();
 
 # 存储已注册并可显式指定
 statement ok
-CREATE PERSISTENT SECRET spike_a (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'spike-mark-PLAIN') IN local_encrypted;
+CREATE PERSISTENT SECRET spike_a IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'spike-mark-PLAIN');
 
 # duckdb_secrets() 可见：persistent + storage 正确
 query I
@@ -42,7 +42,7 @@ SELECT count(*) FROM duckdb_secrets() WHERE name = 'spike_default' AND persisten
 
 # 覆盖写（OR REPLACE 语义经由 OnCreateConflict）
 statement ok
-CREATE OR REPLACE PERSISTENT SECRET spike_a (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'spike-mark-2') IN local_encrypted;
+CREATE OR REPLACE PERSISTENT SECRET spike_a IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'spike-mark-2');
 
 query I
 SELECT count(*) FROM duckdb_secrets() WHERE name = 'spike_a';
