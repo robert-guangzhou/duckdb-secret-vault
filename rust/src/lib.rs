@@ -334,6 +334,9 @@ pub extern "C" fn secret_vault_core_version() -> *const c_char {
 mod tests {
     use super::*;
 
+    // env 变量是进程级共享,cargo test 默认多线程并行 → 串行化所有动 env 的测试
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn env_provider_key() -> u8 {
         // 测试用 env provider(不依赖 keychain/口令输入)
         std::env::set_var(ENV_KEY, B64.encode([7u8; KEY_LEN]));
@@ -342,6 +345,7 @@ mod tests {
 
     #[test]
     fn tp01_format_roundtrip() {
+        let _g = ENV_LOCK.lock().unwrap();
         let p = env_provider_key();
         let blob = seal(p, "s1", b"duckdb-serialized-blob").unwrap();
         assert_eq!(&blob[0..8], MAGIC);
@@ -354,6 +358,7 @@ mod tests {
 
     #[test]
     fn tp03_aad_name_binding() {
+        let _g = ENV_LOCK.lock().unwrap();
         let p = env_provider_key();
         let blob = seal(p, "secret_a", b"payload").unwrap();
         // 改名后解密必须失败(AAD 绑定 secret 名)
@@ -367,6 +372,7 @@ mod tests {
 
     #[test]
     fn tp06_nonce_randomness() {
+        let _g = ENV_LOCK.lock().unwrap();
         let p = env_provider_key();
         let a = seal(p, "s", b"same plaintext").unwrap();
         let b = seal(p, "s", b"same plaintext").unwrap();
@@ -376,6 +382,7 @@ mod tests {
 
     #[test]
     fn tp04_passphrase_deterministic_and_salted() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var(ENV_PASSPHRASE, "correct horse battery staple");
         let blob = seal(PROVIDER_PASSPHRASE, "s", b"x").unwrap();
         let pt = open(PROVIDER_PASSPHRASE, "s", &blob).unwrap();
@@ -393,6 +400,7 @@ mod tests {
 
     #[test]
     fn tp04b_env_key_validation() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var(ENV_KEY, "not-base64!!!");
         let err = seal(PROVIDER_ENV, "s", b"x").unwrap_err();
         assert!(matches!(err, VaultError::BadKeyMaterial(_)));
@@ -403,6 +411,7 @@ mod tests {
 
     #[test]
     fn tp0x_provider_mismatch_and_magic() {
+        let _g = ENV_LOCK.lock().unwrap();
         let p = env_provider_key();
         let blob = seal(p, "s", b"x").unwrap();
         // provider 不匹配(文件由 env 写,按 passphrase 读)
@@ -418,6 +427,7 @@ mod tests {
 
     #[test]
     fn tp0x_error_text_has_no_key_material() {
+        let _g = ENV_LOCK.lock().unwrap();
         std::env::set_var(ENV_KEY, B64.encode([9u8; KEY_LEN]));
         let _ = std::env::var(ENV_KEY).unwrap();
         let secret_b64 = B64.encode([9u8; KEY_LEN]);
