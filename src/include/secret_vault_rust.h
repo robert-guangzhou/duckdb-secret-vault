@@ -33,6 +33,11 @@ extern "C" {
 typedef struct VaultBuf {
   uint8_t *ptr;
   uintptr_t len;
+  /**
+   * 分配容量:与 Rust 侧 Vec 真实 capacity 一致,vault_free_buf 依此释放;
+   * 错值 = 分配器 UB(诚实审查 HIGH-1 修复)。C++ 侧必须原样回传。
+   */
+  uintptr_t cap;
 } VaultBuf;
 
 /**
@@ -55,11 +60,13 @@ int vault_open(uint8_t provider,
 
 /**
  * 最近一次错误的描述(线程本地;不含密钥材料)。
+ * ⚠ 契约:返回指向线程本地缓冲的指针,下一次 vault_* 调用即失效——
+ * 调用方必须立即拷贝,不得跨调用持有(诚实审查 LOW-1)。
  */
 const char *vault_last_error(void);
 
 /**
- * 释放 vault_seal/vault_open 返回的缓冲。
+ * 释放 vault_seal/vault_open 返回的缓冲。buf.len/buf.cap 必须原样传回,不得篡改。
  */
 void vault_free_buf(struct VaultBuf buf);
 
