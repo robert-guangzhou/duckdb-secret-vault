@@ -6,7 +6,9 @@ license = "MIT"
 description = "Encrypted stored-secrets core for the secret_vault DuckDB extension"
 
 [lib]
-crate-type = ["staticlib"]
+# staticlib 供 C++ 链接(corrosion 显式 --crate-type=staticlib);
+# rlib 供 rust/tests 集成测试链接(cargo test 需要)
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 aes-gcm = { version = "0.10", features = ["zeroize"] }
