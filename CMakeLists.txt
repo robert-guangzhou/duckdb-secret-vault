@@ -1,0 +1,103 @@
+cmake_minimum_required(VERSION 3.5)
+
+# ---- Rust 核心接线（蓝本：duckdb-nats-rw，源自 ywelsch/duckdb-prql）----
+set(CORROSION_VERBOSE_OUTPUT ON)
+set(CMAKE_CXX_STANDARD "17" CACHE STRING "C++ standard to enforce")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+execute_process(
+    COMMAND rustup target list --installed
+    OUTPUT_VARIABLE RUST_TARGETS
+)
+
+# Propagate arch to Rust build for CI
+set(Rust_CARGO_TARGET "")
+if("${OS_NAME}" STREQUAL "linux")
+    if ("${OS_ARCH}" STREQUAL "arm64")
+        set(Rust_CARGO_TARGET "aarch64-unknown-linux-gnu")
+    elseif("${CMAKE_CXX_COMPILER}" MATCHES "aarch64")
+        set(Rust_CARGO_TARGET "aarch64-unknown-linux-gnu")
+    else()
+        string(FIND "${RUST_TARGETS}" "musl" MUSL_TARGET_FOUND)
+        if(NOT MUSL_TARGET_FOUND EQUAL -1)
+            set(Rust_CARGO_TARGET "x86_64-unknown-linux-musl")
+        else()
+            set(Rust_CARGO_TARGET "x86_64-unknown-linux-gnu")
+        endif()
+    endif()
+elseif("${OS_NAME}" STREQUAL "osx")
+    if ("${OSX_BUILD_ARCH}" STREQUAL "arm64")
+        set(Rust_CARGO_TARGET "aarch64-apple-darwin")
+    elseif("${OSX_BUILD_ARCH}" STREQUAL "x86_64")
+        set(Rust_CARGO_TARGET "x86_64-apple-darwin")
+    elseif("${OS_ARCH}" STREQUAL "arm64")
+        set(Rust_CARGO_TARGET "aarch64-apple-darwin")
+    endif()
+elseif(WIN32)
+   if (MINGW AND "${OS_ARCH}" STREQUAL "arm64")
+       set(Rust_CARGO_TARGET "aarch64-pc-windows-gnu")
+   elseif (MINGW AND "${OS_ARCH}" STREQUAL "amd64")
+       set(Rust_CARGO_TARGET "x86_64-pc-windows-gnu")
+   elseif (MSVC AND "${OS_ARCH}" STREQUAL "arm64")
+       set(Rust_CARGO_TARGET "aarch64-pc-windows-msvc")
+   elseif (MSVC AND "${OS_ARCH}" STREQUAL "amd64")
+       set(Rust_CARGO_TARGET "x86_64-pc-windows-msvc")
+   endif()
+endif()
+
+if("${Rust_CARGO_TARGET}" STREQUAL "")
+  message(FATAL_ERROR "Failed to detect the correct platform")
+endif()
+message(STATUS "Rust_CARGO_TARGET: ${Rust_CARGO_TARGET}")
+
+set(TARGET_NAME secret_vault)
+
+set(EXTENSION_NAME ${TARGET_NAME}_extension)
+set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
+
+project(${TARGET_NAME})
+
+include_directories(src/include)
+
+if(EMSCRIPTEN)
+    set(Rust_CARGO_TARGET "wasm32-unknown-emscripten")
+endif()
+
+add_subdirectory(corrosion)
+
+corrosion_import_crate(
+  MANIFEST_PATH
+  rust/Cargo.toml
+  CRATES
+  secret_vault
+  CRATE_TYPES
+  staticlib
+  FLAGS
+  --crate-type=staticlib)
+
+set(EXTENSION_SOURCES src/secret_vault_extension.cpp src/secret_vault_storage.cpp)
+
+# FFI 头文件滞后检测（沿用 nats_rw 根治方案）：lib.rs 或 cbindgen.toml 比
+# secret_vault_rust.h 新 → 编译前 FATAL_ERROR
+add_custom_target(secret_vault_header_check
+    COMMAND ${CMAKE_COMMAND}
+        -DBASE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_header_fresh.cmake
+    COMMENT "secret_vault: checking FFI header freshness (lib.rs vs secret_vault_rust.h)"
+    VERBATIM)
+
+build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
+build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+add_dependencies(${EXTENSION_NAME} secret_vault_header_check)
+add_dependencies(${LOADABLE_EXTENSION_NAME} secret_vault_header_check)
+
+# staticlib 自含 Rust std：两种目标单文件自足
+target_link_libraries(${EXTENSION_NAME} secret_vault-static)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} secret_vault-static)
+
+install(
+  TARGETS ${EXTENSION_NAME}
+  EXPORT "${DUCKDB_EXPORT_SET}"
+  LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
+  ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")

@@ -1,0 +1,8 @@
+build/
+cmake-build-*/
+target/
+*.duckdb_extension
+*.duckdb.extension
+test_output/
+tmp/
+rust/target/

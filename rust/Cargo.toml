@@ -1,0 +1,13 @@
+[package]
+name = "secret_vault"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Encrypted stored-secrets core for the secret_vault DuckDB extension"
+
+[lib]
+crate-type = ["staticlib"]
+
+# 阶段零 spike:零外部依赖,证明 corrosion+cbindgen+staticlib 链路;
+# 阶段一引入 aes-gcm/argon2/zeroize/rand/base64(届时评估 crates.io 镜像配置)。
+[dependencies]
