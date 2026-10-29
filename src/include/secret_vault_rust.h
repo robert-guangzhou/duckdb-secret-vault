@@ -12,9 +12,62 @@ extern "C" {
 #endif
 
 
+#define FORMAT_VERSION 1
+
+#define HEADER_LEN 40
+
+#define KEY_LEN 32
+
+#define SALT_LEN 16
+
+#define NONCE_LEN 12
+
+#define TAG_LEN 16
+
+#define PROVIDER_KEYRING 1
+
+#define PROVIDER_PASSPHRASE 2
+
+#define PROVIDER_ENV 3
+
+typedef struct VaultBuf {
+  uint8_t *ptr;
+  uintptr_t len;
+} VaultBuf;
+
 /**
- * C ABI:返回 Rust core 版本串(静态存储,无需释放)。
+ * 加密。name 以 NUL 结尾;plaintext 为 DuckDB 序列化 blob。
  */
+int vault_seal(uint8_t provider,
+               const char *name,
+               const uint8_t *plaintext,
+               uintptr_t plaintext_len,
+               struct VaultBuf *out);
+
+/**
+ * 解密。blob 为完整 vault 文件字节。
+ */
+int vault_open(uint8_t provider,
+               const char *name,
+               const uint8_t *blob,
+               uintptr_t blob_len,
+               struct VaultBuf *out);
+
+/**
+ * 最近一次错误的描述(线程本地;不含密钥材料)。
+ */
+const char *vault_last_error(void);
+
+/**
+ * 释放 vault_seal/vault_open 返回的缓冲。
+ */
+void vault_free_buf(struct VaultBuf buf);
+
+/**
+ * 显式清零一段缓冲(密钥材料跨边界后的卫生钩子,Dev Plan 六)。
+ */
+void vault_zeroize_buf(uint8_t *ptr, uintptr_t len);
+
 const char *secret_vault_core_version(void);
 
 #ifdef __cplusplus
