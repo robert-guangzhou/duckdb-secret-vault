@@ -9,7 +9,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/uuid.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 namespace duckdb {
 
