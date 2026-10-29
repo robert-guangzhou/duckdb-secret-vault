@@ -17,12 +17,12 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use rand::rngs::OsRng;
+use rand::{RngCore, rngs::OsRng};
 use zeroize::{Zeroize, Zeroizing};
 
 // ==== 常量与文件格式 ====
 
-pub const MAGIC: &[u8; 8] = b"DSVLT\0\0";
+pub const MAGIC: &[u8; 8] = b"DSVLT\0\0\0";
 pub const FORMAT_VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 40; // 8+2+1+1+16+12
 pub const KEY_LEN: usize = 32;
@@ -76,7 +76,7 @@ pub type VaultResult<T> = Result<T, VaultError>;
 
 // ==== KeyProvider ====
 
-fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<Key<Aes256Gcm>>> {
+fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8; KEY_LEN]>> {
     match provider {
         PROVIDER_KEYRING => {
             // OS keychain 主密钥(salt 置零,主密钥直接作 AEAD key)。
@@ -92,7 +92,7 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<Key<
             }
             let mut key = Zeroizing::new([0u8; KEY_LEN]);
             key.copy_from_slice(&master);
-            Ok(Zeroizing::new(Key::<Aes256Gcm>::clone_from_slice(&key)))
+            Ok(key)
         }
         PROVIDER_PASSPHRASE => {
             let pass = Zeroizing::new(std::env::var(ENV_PASSPHRASE).map_err(|_| {
@@ -104,7 +104,7 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<Key<
             let mut key = Zeroizing::new([0u8; KEY_LEN]);
             a2.hash_password_into(pass.as_bytes(), salt, key.as_mut())
                 .map_err(|e| VaultError::Io(format!("argon2: {e}")))?;
-            Ok(Zeroizing::new(Key::<Aes256Gcm>::clone_from_slice(&key)))
+            Ok(key)
         }
         PROVIDER_ENV => {
             // base64 编码的 32 字节随机密钥(生成:openssl rand -base64 32)
@@ -120,7 +120,9 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<Key<
                     raw.len()
                 )));
             }
-            Ok(Zeroizing::new(Key::<Aes256Gcm>::clone_from_slice(&raw)))
+            let mut key = Zeroizing::new([0u8; KEY_LEN]);
+            key.copy_from_slice(&raw);
+            Ok(key)
         }
         other => Err(VaultError::BadProvider(other)),
     }
@@ -137,7 +139,7 @@ pub fn seal(provider: u8, name: &str, plaintext: &[u8]) -> VaultResult<Vec<u8>> 
     let nonce_bytes = Aes256Gcm::generate_nonce(&mut OsRng);
 
     let key = derive_key(provider, &salt)?;
-    let cipher = Aes256Gcm::new(key.as_ref().as_slice());
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*key));
 
     let mut out = Vec::with_capacity(HEADER_LEN + plaintext.len() + TAG_LEN);
     out.extend_from_slice(MAGIC);
@@ -193,8 +195,9 @@ pub fn open(provider: u8, name: &str, blob: &[u8]) -> VaultResult<Vec<u8>> {
     let nonce = Nonce::from_slice(&blob[28..40]);
 
     let key = derive_key(provider, &salt)?;
-    let cipher = Aes256Gcm::new(key.as_ref().as_slice());
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*key));
 
+    // AAD = 头 + 名(与 seal 一致)
     let mut aad = blob[..HEADER_LEN].to_vec();
     aad.extend_from_slice(name.as_bytes());
 
@@ -432,7 +435,9 @@ mod tests {
         let key = Key::<Aes256Gcm>::from_slice(&[0u8; 32]);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(&[0u8; 12]);
-        let ct = cipher.encrypt(nonce, b"").expect("seal");
+        let ct = cipher
+            .encrypt(nonce, Payload { msg: &[], aad: &[] })
+            .expect("seal");
         assert_eq!(ct.len(), TAG_LEN);
         assert_eq!(
             ct,

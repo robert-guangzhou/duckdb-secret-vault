@@ -9,7 +9,7 @@ description = "Encrypted stored-secrets core for the secret_vault DuckDB extensi
 crate-type = ["staticlib"]
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 argon2 = "0.5"
 zeroize = "1"
 rand = "0.8"
