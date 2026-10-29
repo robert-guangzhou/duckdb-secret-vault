@@ -2,12 +2,12 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_set.hpp"
-#include "duckdb/common/buffer/buffered_file_reader.hpp"
-#include "duckdb/common/buffer/buffered_file_writer.hpp"
+#include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/buffered_file_reader.hpp"
+#include "duckdb/common/serializer/buffered_file_writer.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/local_file_system.hpp"
-#include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/uuid.hpp"
 
