@@ -54,13 +54,18 @@ fn open_from_vec(name: &str, blob: &[u8]) -> Result<Vec<u8>, i32> {
 fn vectors_open_deterministic() {
     std::env::set_var("SECRET_VAULT_KEY", B64.encode(FIXTURE_KEY));
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors.json");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}(若首次生成,运行 VECTORS_GEN=1 cargo test --test vectors)", path.display()));
-
-    if std::env::var("VECTORS_GEN").is_ok() {
-        eprintln!("VECTORS_GEN set but vectors.json already exists; delete it to regenerate");
+    if !path.exists() {
+        if std::env::var("VECTORS_GEN").is_ok() {
+            eprintln!("vectors.json not yet generated; generation test runs in parallel — rerun without VECTORS_GEN to verify");
+            return;
+        }
+        panic!(
+            "read {}: not found(若首次生成,运行 VECTORS_GEN=1 cargo test --test vectors)",
+            path.display()
+        );
     }
 
+    let text = std::fs::read_to_string(&path).expect("read vectors.json");
     let cases: Vec<(String, String, String)> = serde_json::from_str(&text).expect("valid vectors.json");
     assert!(cases.len() >= 4, "expected at least 4 fixtures");
     for (name, blob_b64, pt_b64) in &cases {
