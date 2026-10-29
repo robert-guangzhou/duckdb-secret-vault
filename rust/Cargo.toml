@@ -8,6 +8,15 @@ description = "Encrypted stored-secrets core for the secret_vault DuckDB extensi
 [lib]
 crate-type = ["staticlib"]
 
-# 阶段零 spike:零外部依赖,证明 corrosion+cbindgen+staticlib 链路;
-# 阶段一引入 aes-gcm/argon2/zeroize/rand/base64(届时评估 crates.io 镜像配置)。
 [dependencies]
+aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = "1"
+rand = "0.8"
+base64 = "0.22"
+keyring = { version = "4", features = [
+    "v1",
+    "apple-native-keyring-store",
+    "windows-native-keyring-store",
+    "zbus-secret-service-keyring-store",
+] }
