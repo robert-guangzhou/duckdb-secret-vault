@@ -3,13 +3,15 @@
 DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密**存储
 (存储名 `local_encrypted`),替换默认 `local_file` 的明文落盘。
 
-> **当前状态:阶段零(spike)+ 阶段一(Rust 加密核心)完成**
-> —— SecretStorage 注册/CRUD/自动加载/脱敏接缝已打通并验证;加密核心
-> (AES-256-GCM、keyring/passphrase/env 三 provider、zeroize)已实现且单测全绿。
-> **C++ 存储层尚未接入加密**(落盘暂为明文序列化,阶段二接 `vault_seal/vault_open`),
-> 一次性封套 export/import 按计划分阶段接入。
+> **当前状态:阶段零(spike)+ 阶段一(Rust 加密核心)+ 阶段二(C++ 加密存储层)完成**
+> —— SecretStorage 接缝已验证;AES-256-GCM 核心单测/FFI/向量全绿;**落盘已是真密文**
+> (DSVLT 头 + AEAD,at-rest 字节断言通过),settings(secret_vault_provider/secret_vault_directory)
+> 与 `secret_vault_status()` 已实现。一次性封套 export/import 属阶段三。
 >
-> 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r5)
+> ⚠ 已知边界:文件损坏(篡改/坏密钥遗留)时 `CREATE OR REPLACE` 会因懒加载失败而报错,
+> 唯一恢复路径是**手动删除该 secret 文件后重建**(与 local_file 损坏文件语义一致)。
+>
+> 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r6)
 
 ## 构建(minis Docker 模式,与 duckdb-nats-rw 同链路)
 
