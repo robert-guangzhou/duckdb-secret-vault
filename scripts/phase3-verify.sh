@@ -91,7 +91,7 @@ PY
 new_home /tmp/vh-p3-eb
 export SECRET_VAULT_PASSPHRASE=import-side-pass
 echo "[E3-debug] code head: ${CODE:0:8} len=${#CODE}"
-N=$(echo "$CODE" | $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SELECT imported FROM secret_vault_import('/tmp/p3bundle.svb');" 2>&1 | tail -2)
+N=$(echo "$CODE" | $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='passphrase'; SELECT imported FROM secret_vault_import('/tmp/p3bundle.svb');" 2>&1 | tail -1)
 echo "[E3] stdin 导入(B 无 KEY,passphrase 体系) imported = $N (expect 2)"
 N=$(SQLL "SET secret_vault_provider='passphrase'; SELECT count(*) FROM duckdb_secrets() WHERE name IN ('s1','s2') AND secret_string LIKE '%password=redacted%';")
 echo "[E4] B 用自己口令读取(脱敏) = $N (expect 2)"
