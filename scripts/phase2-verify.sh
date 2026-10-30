@@ -103,7 +103,8 @@ $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_exten
 python3 $WS/scripts/verify-at-rest.py "$HOME/.duckdb/stored_secrets_vault" pw 'L-MARK' | tail -1
 N=$($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='passphrase'; SELECT count(*) FROM duckdb_secrets() WHERE name='pw' AND secret_string LIKE '%password=redacted%';")
 echo "[L1] passphrase roundtrip + redaction: count=$N (expect 1)"
-(SECRET_VAULT_PASSPHRASE=wrong-pass $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='passphrase'; SELECT name FROM duckdb_secrets() WHERE name='pw';" 2>&1 | tail -1) || true
+(SECRET_VAULT_PASSPHRASE=wrong-pass $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='passphrase'; SELECT name FROM duckdb_secrets() WHERE name='pw';" 2>&1 | tail -2 | tee /tmp/l2.err) || true
+grep -q "AEAD tag mismatch" /tmp/l2.err && echo "[L2] wrong passphrase -> AEAD: PASS" || echo "[L2] FAIL"
 echo "[L2] wrong passphrase above: expect AEAD tag mismatch"
 
 echo "== M. TP-24b 修正:keyring provider 在无 dbus 容器经扩展 CREATE(加密路径)→ 明确报错 =="
