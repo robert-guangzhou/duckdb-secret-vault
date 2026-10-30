@@ -10,6 +10,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -459,7 +460,7 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 	// 码:参数优先;否则 stderr 提示 + stdin 读一行(管道/重定向均可)
 	uint8_t transport[32];
 	if (!bind.code.empty()) {
-		if (vault_base32_to_key(bind.code, transport) != 0) {
+		if (vault_base32_to_key(bind.code.c_str(), transport) != 0) {
 			throw InvalidInputException("secret_vault_import: %s", VaultLastError());
 		}
 	} else {
@@ -472,7 +473,7 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 		}
 		string code(line);
 		code.erase(code.find_last_not_of(" \r\n\t") + 1);
-		if (vault_base32_to_key(code, transport) != 0) {
+		if (vault_base32_to_key(code.c_str(), transport) != 0) {
 			throw InvalidInputException("secret_vault_import: %s", VaultLastError());
 		}
 	}
@@ -517,25 +518,39 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 //===--------------------------------------------------------------------===//
 
 void RegisterVaultFunctions(ExtensionLoader &loader) {
-	TableFunction migrate_fn("secret_vault_migrate", {}, MigrateExecute, MigrateBind::Create, OnceGlobal::Init);
-	migrate_fn.named_parameters["delete_source"] = LogicalType::BOOLEAN;
+	// 注意:v2.0 表函数签名 API——位置参数经 FunctionSignature,具名参数经
+	// GetSignature().WithTypedKkwargs(nats_rw 同款);bind 侧仍读 input.named_parameters。
+	TableFunction migrate_fn(Identifier("secret_vault_migrate"), FunctionSignature(), MigrateExecute,
+	                         MigrateBind::Create, OnceGlobal::Init);
+	migrate_fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("delete_source", LogicalType(LogicalTypeId::BOOLEAN));
+	});
 	loader.RegisterFunction(migrate_fn);
 
-	TableFunction rotate_fn("secret_vault_rotate", {}, RotateExecute, RotateBind::Create, OnceGlobal::Init);
-	rotate_fn.named_parameters["new_provider"] = LogicalType::VARCHAR;
-	rotate_fn.named_parameters["new_passphrase"] = LogicalType::VARCHAR;
-	rotate_fn.named_parameters["new_key"] = LogicalType::VARCHAR;
+	TableFunction rotate_fn(Identifier("secret_vault_rotate"), FunctionSignature(), RotateExecute,
+	                        RotateBind::Create, OnceGlobal::Init);
+	rotate_fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("new_provider", LogicalType(LogicalTypeId::VARCHAR));
+		options.Add("new_passphrase", LogicalType(LogicalTypeId::VARCHAR));
+		options.Add("new_key", LogicalType(LogicalTypeId::VARCHAR));
+	});
 	loader.RegisterFunction(rotate_fn);
 
-	TableFunction export_fn("secret_vault_export", {LogicalType::VARCHAR}, ExportExecute, ExportBind::Create,
-	                        OnceGlobal::Init);
-	export_fn.named_parameters["code"] = LogicalType::VARCHAR;
+	TableFunction export_fn(Identifier("secret_vault_export"),
+	                        FunctionSignature().AddPositionalOnly("file", LogicalType(LogicalTypeId::VARCHAR)),
+	                        ExportExecute, ExportBind::Create, OnceGlobal::Init);
+	export_fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("code", LogicalType(LogicalTypeId::VARCHAR));
+	});
 	loader.RegisterFunction(export_fn);
 
-	TableFunction import_fn("secret_vault_import", {LogicalType::VARCHAR}, ImportExecute, ImportBind::Create,
-	                        OnceGlobal::Init);
-	import_fn.named_parameters["code"] = LogicalType::VARCHAR;
-	import_fn.named_parameters["on_conflict"] = LogicalType::VARCHAR;
+	TableFunction import_fn(Identifier("secret_vault_import"),
+	                        FunctionSignature().AddPositionalOnly("file", LogicalType(LogicalTypeId::VARCHAR)),
+	                        ImportExecute, ImportBind::Create, OnceGlobal::Init);
+	import_fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("code", LogicalType(LogicalTypeId::VARCHAR));
+		options.Add("on_conflict", LogicalType(LogicalTypeId::VARCHAR));
+	});
 	loader.RegisterFunction(import_fn);
 }
 
