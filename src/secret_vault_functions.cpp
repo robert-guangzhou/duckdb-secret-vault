@@ -46,44 +46,6 @@ static bool ReadWholeFile(FileSystem &fs, const string &path, string &out) {
 	return true;
 }
 
-// 加密写盘:seal(当前 provider) → 临时文件 + 原子 rename,私有权限
-static void WriteEncryptedFile(FileSystem &fs, const string &dir, const string &name, const string &plaintext) {
-	fs.CreateDirectoriesRecursive(dir);
-	string file_path = fs.JoinPath(dir, name + VAULT_FILE_SUFFIX);
-	string temp_path = file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
-	fs.TryRemoveFile(file_path);
-	fs.TryRemoveFile(temp_path);
-	{
-		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_PRIVATE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
-		VaultBufGuard cipher;
-		if (vault_seal(VaultProviderId(), name.c_str(),
-		               reinterpret_cast<const_data_ptr_t>(plaintext.data()), plaintext.size(), &cipher.buf) != 0) {
-			throw InvalidInputException("secret_vault: encrypt failed for secret '%s' (provider %s): %s", name,
-			                            VaultProviderName(VaultProviderId()), VaultLastError());
-		}
-		auto writer = BufferedFileWriter(fs, temp_path, flags);
-		writer.WriteData(cipher.buf.ptr, cipher.buf.len);
-		writer.Flush();
-	}
-	fs.MoveFile(temp_path, file_path);
-}
-
-// 解密读盘:整读 + vault_open(AAD 绑定文件名)
-static string ReadDecryptedFile(FileSystem &fs, const string &path, const string &name) {
-	auto reader = BufferedFileReader(fs, path.c_str());
-	idx_t size = reader.FileSize();
-	auto cipher = make_unsafe_uniq_array<data_t>(size);
-	reader.ReadData(cipher.get(), size);
-	VaultBufGuard plain;
-	if (vault_open(VaultProviderId(), name.c_str(), cipher.get(), size, &plain.buf) != 0) {
-		throw SerializationException("secret_vault: decrypt failed for secret '%s' (provider %s): %s", name,
-		                             VaultProviderName(VaultProviderId()), VaultLastError());
-	}
-	return string(reinterpret_cast<const char *>(plain.buf.ptr), plain.buf.len);
-}
-
-// 解密读盘:整读 + vault_open(AAD 绑定文件名)
-
 // 列出目录中后缀匹配的文件基名(排序稳定)
 static vector<string> ListBaseNames(FileSystem &fs, const string &dir, const char *suffix) {
 	vector<string> names;
@@ -172,15 +134,23 @@ static vector<EnvelopeEntry> DecodePayload(const string &payload) {
 
 struct MigrateBind : TableFunctionData {
 	bool delete_source = false;
+	string on_conflict = "error"; // P3-M2:消除静默覆盖;与 import 一致
 	static unique_ptr<FunctionData> Create(ClientContext &context, TableFunctionBindInput &input,
 	                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 		auto bind = make_uniq<MigrateBind>();
 		for (auto &kv : input.named_parameters) {
 			if (kv.first == "delete_source") {
 				bind->delete_source = kv.second.GetValue<bool>();
+			} else if (kv.first == "on_conflict") {
+				bind->on_conflict = StringUtil::Lower(kv.second.ToString());
+				if (bind->on_conflict != "error" && bind->on_conflict != "overwrite" && bind->on_conflict != "skip") {
+					throw InvalidInputException("secret_vault_migrate: on_conflict must be error|overwrite|skip");
+				}
 			}
 		}
 		names.emplace_back("migrated");
+		return_types.emplace_back(LogicalType::UBIGINT);
+		names.emplace_back("skipped");
 		return_types.emplace_back(LogicalType::UBIGINT);
 		return std::move(bind);
 	}
@@ -208,20 +178,42 @@ static void MigrateExecute(ClientContext &context, TableFunctionInput &data, Dat
 	auto &fs = LocalFS();
 	string source_dir = SecretManager::Get(context).PersistentSecretPath();
 	auto sources = ListBaseNames(fs, source_dir, ".duckdb_secret");
-	idx_t migrated = 0;
+	auto &bind = data.bind_data->Cast<MigrateBind>();
+	idx_t migrated = 0, skipped = 0;
 	for (auto &name : sources) {
+		string src_path = fs.JoinPath(source_dir, name + ".duckdb_secret");
+		// P3-L1:源明文文件权限校验(对齐 local_file 读取语义)
+		if (!LocalFileSystem::IsPrivateFile(src_path, nullptr)) {
+			throw IOException("The source secret file '%s' has incorrect permissions! Fix with chmod 600 and retry",
+			                  src_path);
+		}
+		string target = fs.JoinPath(storage->PublicDirectory(), name + VAULT_FILE_SUFFIX);
+		if (fs.FileExists(target)) {
+			if (bind.on_conflict == "skip") {
+				skipped++;
+				continue;
+			}
+			if (bind.on_conflict == "error") {
+				throw InvalidInputException(
+				    "secret_vault_migrate: secret '%s' already exists in '%s' (use on_conflict := 'overwrite' or "
+				    "'skip')",
+				    name, storage->PublicDirectory());
+			}
+		}
 		string plaintext;
-		if (!ReadWholeFile(fs, fs.JoinPath(source_dir, name + ".duckdb_secret"), plaintext)) {
+		if (!ReadWholeFile(fs, src_path, plaintext)) {
 			continue;
 		}
-		WriteEncryptedFile(fs, storage->PublicDirectory(), name, plaintext);
-		if (data.bind_data->Cast<MigrateBind>().delete_source) {
-			fs.RemoveFile(fs.JoinPath(source_dir, name + ".duckdb_secret"));
+		VaultWriteEncryptedFile(fs, storage->PublicDirectory(), name, plaintext.data(), plaintext.size());
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(plaintext.data()), plaintext.size());
+		if (bind.delete_source) {
+			fs.RemoveFile(src_path);
 		}
 		migrated++;
 	}
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value::UBIGINT(migrated));
+	output.SetValue(1, 0, Value::UBIGINT(skipped));
 }
 
 //===--------------------------------------------------------------------===//
@@ -287,11 +279,26 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 	vector<string> plaintexts;
 	plaintexts.reserve(names.size());
 	for (auto &n : names) {
-		plaintexts.push_back(ReadDecryptedFile(fs, fs.JoinPath(dir, n + VAULT_FILE_SUFFIX), n));
+		plaintexts.push_back(VaultReadDecryptedFile(fs, fs.JoinPath(dir, n + VAULT_FILE_SUFFIX), n));
 	}
 
-	// 切换到新 provider/新密钥材料
+	// 切换到新 provider/新密钥材料。
+	// P3-M1:保留旧 env 值,写阶段失败时恢复——否则旧钥文件将无法解密
+	// (半失败恢复步骤见 README:重设旧口令 → 重新 rotate)
 	uint8_t old_provider = VaultProviderId();
+	const char *old_pass_env = std::getenv("SECRET_VAULT_PASSPHRASE");
+	string old_pass = old_pass_env ? string(old_pass_env) : string();
+	const char *old_key_env = std::getenv("SECRET_VAULT_KEY");
+	string old_key = old_key_env ? string(old_key_env) : string();
+	auto restore_env = [&]() {
+#ifdef _WIN32
+		_putenv_s("SECRET_VAULT_PASSPHRASE", old_pass.c_str());
+		_putenv_s("SECRET_VAULT_KEY", old_key.c_str());
+#else
+		setenv("SECRET_VAULT_PASSPHRASE", old_pass.c_str(), 1);
+		setenv("SECRET_VAULT_KEY", old_key.c_str(), 1);
+#endif
+	};
 	if (bind.have_passphrase) {
 #ifdef _WIN32
 		_putenv_s("SECRET_VAULT_PASSPHRASE", bind.new_passphrase.c_str());
@@ -312,7 +319,7 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 	idx_t rotated = 0;
 	try {
 		for (idx_t i = 0; i < names.size(); i++) {
-			WriteEncryptedFile(fs, dir, names[i], plaintexts[i]);
+			VaultWriteEncryptedFile(fs, dir, names[i], plaintexts[i].data(), plaintexts[i].size());
 			// 卫生:明文副本即用即清
 			auto *p = reinterpret_cast<data_ptr_t>(plaintexts[i].data());
 			vault_zeroize_buf(p, plaintexts[i].size());
@@ -320,8 +327,16 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 		}
 	} catch (std::exception &) {
 		SetVaultProviderGlobal(old_provider);
+		restore_env();
+		// 卫生:失败路径剩余明文也清零(P3-M3)
+		for (auto &pt : plaintexts) {
+			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
+		}
 		throw;
 	}
+	// 卫生:rotate 参数中的新口令/新密钥用后清零(不入残余内存)
+	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(bind.new_passphrase.data()), bind.new_passphrase.size());
+	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(bind.new_key.data()), bind.new_key.size());
 
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value::UBIGINT(rotated));
@@ -377,7 +392,7 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 	vector<EnvelopeEntry> entries;
 	entries.reserve(names.size());
 	for (auto &n : names) {
-		entries.push_back(EnvelopeEntry {n, ReadDecryptedFile(fs, fs.JoinPath(dir, n + VAULT_FILE_SUFFIX), n)});
+		entries.push_back(EnvelopeEntry {n, VaultReadDecryptedFile(fs, fs.JoinPath(dir, n + VAULT_FILE_SUFFIX), n)});
 	}
 	string payload = EncodePayload(entries);
 
@@ -387,6 +402,8 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 		if (vault_base32_to_key(bind.code.c_str(), transport) != 0) {
 			throw InvalidInputException("secret_vault_export: %s", VaultLastError());
 		}
+		// 卫生:码等价于信封密钥,用后即清(P3-M3)
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(bind.code.data()), bind.code.size());
 	} else {
 		vault_transport_key_generate(transport);
 	}
@@ -396,16 +413,21 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 		throw InvalidInputException("secret_vault_export: %s", VaultLastError());
 	}
 	{
-		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
+		// P3-H2:信封承载全部 secret 明文(仅一次性码保护),权限不得弱于单文件密文
+		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_PRIVATE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
 		auto writer = BufferedFileWriter(fs, bind.file, flags);
 		writer.WriteData(envelope.buf.ptr, envelope.buf.len);
 		writer.Flush();
 	}
 	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(payload.data()), payload.size());
+	for (auto &e : entries) {
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
+	}
 
-	// 一次性码仅在结果行出现(查询输出即"显示一次")
-	char code_buf[64];
+	// 一次性码仅在结果行出现(查询输出即"显示一次");生成码之后才清 transport
+	char code_buf[64] = {0};
 	vault_key_to_base32(transport, code_buf, sizeof(code_buf));
+	vault_zeroize_buf(transport, sizeof(transport));
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value(bind.file));
 	output.SetValue(1, 0, Value(string(code_buf)));
@@ -490,6 +512,7 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 	string payload_str(reinterpret_cast<const char *>(payload.buf.ptr), payload.buf.len);
 	auto entries = DecodePayload(payload_str);
 	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(payload_str.data()), payload_str.size());
+	vault_zeroize_buf(transport, sizeof(transport));
 
 	auto dir = storage->PublicDirectory();
 	idx_t imported = 0, skipped = 0;
@@ -505,7 +528,8 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 			    "secret_vault_import: secret '%s' already exists in '%s' (use on_conflict := 'overwrite' or 'skip')",
 			    e.name, dir);
 		}
-		WriteEncryptedFile(fs, dir, e.name, e.plaintext);
+		VaultWriteEncryptedFile(fs, dir, e.name, e.plaintext.data(), e.plaintext.size());
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
 		imported++;
 	}
 	output.SetCardinality(1);
@@ -524,6 +548,7 @@ void RegisterVaultFunctions(ExtensionLoader &loader) {
 	                         MigrateBind::Create, OnceGlobal::Init);
 	migrate_fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("delete_source", LogicalType(LogicalTypeId::BOOLEAN));
+		options.Add("on_conflict", LogicalType(LogicalTypeId::VARCHAR));
 	});
 	loader.RegisterFunction(migrate_fn);
 

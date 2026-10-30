@@ -34,11 +34,18 @@ bool TryParseProviderName(const string &name, uint8_t &out);
 string VaultLastError();
 
 //! VaultBuf RAII 守卫(全面 review CR-H1/H2 修复):析构 = zeroize + 按契约释放,
-//! 正常与异常路径均不泄漏、明文不留残留。storage/functions 共用。
+//! 正常与异常路径均不泄漏、明文不留残留。storage 与 functions 共用。
 struct VaultBufGuard {
 	VaultBuf buf {nullptr, 0, 0};
 	~VaultBufGuard();
 };
+
+//! 公共助手(P3-L2 去重:storage 与 functions 共用同一实现)
+//! seal(当前 provider)→ 私有权限临时文件 + 原子 rename
+void VaultWriteEncryptedFile(class FileSystem &fs, const string &dir, const string &name, const void *plaintext,
+                             size_t plain_len);
+//! 整读密文文件 + vault_open(AAD 绑定 name)
+string VaultReadDecryptedFile(class FileSystem &fs, const string &path, const string &name);
 
 //! 全局存储实例(单 DB 假设,README 语义节;settings/status/函数层经此触达)
 class VaultSecretStorage;

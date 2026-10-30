@@ -25,6 +25,10 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > 唯一恢复路径是**手动删除该 secret 文件后重建**(与 local_file 损坏文件语义一致)。
 >
 > **语义与假设(必读)**:
+> - `secret_vault_migrate` 同名冲突默认报错,`on_conflict := 'overwrite'|'skip'` 显式选择;源文件须为 600 私有权限。
+> - `secret_vault_rotate` 为两遍式:读阶段任一失败不动盘;**写阶段中途失败会留下新旧密钥混合状态**(进程已自动恢复旧 provider 与旧环境密钥)——恢复步骤:重新以旧口令/密钥 SET 后再次 rotate。
+> - `secret_vault_export` 的信封文件以 600 私有权限落盘(承载全部 secret 明文,仅一次性码保护)。
+> - passphrase 的交互提示只在 stdin 为 tty 且未设环境变量时出现;多连接并发触发提示属未定义行为(单会话设计)。
 > - `secret_vault_provider` 是**进程级全局**设置:任一会话 SET 后对全进程生效,
 >   多会话并发设不同值属未定义行为(单会话/单调度进程场景设计)。
 > - 存储实例为**单 DatabaseInstance 假设**;同进程 attach 多个数据库并各自 LOAD 时,

@@ -46,6 +46,11 @@ SQLL "SET secret_vault_provider='env'; CREATE PERSISTENT SECRET m3 IN local_encr
 SQLL "CREATE PERSISTENT SECRET m3lf (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-3LF');" >/dev/null
 SQLL "SET secret_vault_provider='env'; SELECT migrated FROM secret_vault_migrate(delete_source := true);" >/dev/null
 echo "[B6] delete_source 后源目录:"; ls "$HOME/.duckdb/stored_secrets/" | wc -l
+# B7:migrate 同名冲突(P3-M2:默认 error,skip 计数)
+SQLL "CREATE PERSISTENT SECRET m1 (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-PLAIN-1');" >/dev/null
+(SQLL "SET secret_vault_provider='env'; SELECT migrated FROM secret_vault_migrate();" 2>&1 | grep -m1 "already exists") && echo "[B7a] conflict default=error: PASS"
+R=$(SQLL "SET secret_vault_provider='env'; SELECT migrated || '|' || skipped FROM secret_vault_migrate(on_conflict := 'skip');")
+echo "[B7b] skip 结果 migrated|skipped = $R (expect 0|1)"
 
 echo "== C. rotate 跨口令(TP-33:旧口令失效新口令可读) =="
 new_home /tmp/vh-p3-c
@@ -86,6 +91,10 @@ print("[E2b] 明文 marker:", b.count(b"ENV-MARK-1") + b.count(b"ENV-MARK-2"), "
 import os, base64
 keyb64 = base64.b64encode(b"\x07"*32)
 print("[E2c] 导出方密钥材料:", b.count(keyb64), "(expect 0)")
+import stat
+mode = stat.S_IMODE(os.stat("/tmp/p3bundle.svb").st_mode)
+print("[E2d] envelope mode:", oct(mode), "(expect 0o600)")
+assert mode == 0o600, "envelope must be private (P3-H2)"
 PY
 # 实例 B:passphrase 体系(无 SECRET_VAULT_KEY)
 new_home /tmp/vh-p3-eb

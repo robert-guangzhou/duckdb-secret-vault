@@ -43,6 +43,45 @@ void SetVaultStorage(VaultSecretStorage *storage) {
 }
 
 //===--------------------------------------------------------------------===//
+// 公共 seal/open 助手(P3-L2 去重:storage 与 functions 共用)
+//===--------------------------------------------------------------------===//
+
+void VaultWriteEncryptedFile(FileSystem &fs, const string &dir, const string &name, const void *plaintext,
+                             size_t plain_len) {
+	fs.CreateDirectoriesRecursive(dir);
+	string file_path = fs.JoinPath(dir, name + VAULT_FILE_SUFFIX);
+	string temp_path = file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
+	fs.TryRemoveFile(file_path);
+	fs.TryRemoveFile(temp_path);
+	{
+		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_PRIVATE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
+		VaultBufGuard cipher;
+		if (vault_seal(VaultProviderId(), name.c_str(), static_cast<const_data_ptr_t>(plaintext), plain_len,
+		               &cipher.buf) != 0) {
+			throw InvalidInputException("secret_vault: encrypt failed for secret '%s' (provider %s): %s", name,
+			                            VaultProviderName(VaultProviderId()), VaultLastError());
+		}
+		auto writer = BufferedFileWriter(fs, temp_path, flags);
+		writer.WriteData(cipher.buf.ptr, cipher.buf.len);
+		writer.Flush();
+	}
+	fs.MoveFile(temp_path, file_path);
+}
+
+string VaultReadDecryptedFile(FileSystem &fs, const string &path, const string &name) {
+	auto reader = BufferedFileReader(fs, path.c_str());
+	idx_t size = reader.FileSize();
+	auto cipher = make_unsafe_uniq_array<data_t>(size);
+	reader.ReadData(cipher.get(), size);
+	VaultBufGuard plain;
+	if (vault_open(VaultProviderId(), name.c_str(), cipher.get(), size, &plain.buf) != 0) {
+		throw SerializationException("secret_vault: decrypt failed for secret '%s' (provider %s): %s", name,
+		                             VaultProviderName(VaultProviderId()), VaultLastError());
+	}
+	return string(reinterpret_cast<const char *>(plain.buf.ptr), plain.buf.len);
+}
+
+//===--------------------------------------------------------------------===//
 // 全局配置
 //===--------------------------------------------------------------------===//
 
@@ -122,32 +161,12 @@ unique_ptr<CatalogEntry> VaultSecretGenerator::CreateDefaultEntryInternal(const 
 		                  secret_path);
 	}
 
-	// 整读密文
-	idx_t file_size;
-	unsafe_unique_array<data_t> cipher;
-	try {
-		auto file_reader = BufferedFileReader(fs, secret_path.c_str());
-		file_size = file_reader.FileSize();
-		cipher = make_unsafe_uniq_array<data_t>(file_size);
-		file_reader.ReadData(cipher.get(), file_size);
-	} catch (std::exception &ex) {
-		ErrorData error(ex);
-		throw IOException("Failed to open or read the vault secret file: '%s'. (error message: '%s')", secret_path,
-		                  error.RawMessage());
-	}
-
-	// 解密:错密钥/错名/篡改统一 AEAD 失败(直接抛出,不重复包装)。
-	// plain 由守卫持有:反序列化抛出时同样 zeroize+free(CR-H1 修复)
-	VaultBufGuard plain;
-	int rc = vault_open(VaultProviderId(), orig_name.c_str(), cipher.get(), file_size, &plain.buf);
-	if (rc != 0) {
-		throw SerializationException("secret_vault: decrypt failed for secret '%s' (provider %s): %s", orig_name,
-		                              VaultProviderName(VaultProviderId()), VaultLastError());
-	}
+	// 整读 + 解密(公共助手,P3-L2 去重)
+	string plaintext = VaultReadDecryptedFile(fs, secret_path, orig_name);
 
 	unique_ptr<BaseSecret> deserialized_secret;
 	try {
-		MemoryStream plain_stream(plain.buf.ptr, plain.buf.len);
+		MemoryStream plain_stream(reinterpret_cast<data_ptr_t>(plaintext.data()), plaintext.size());
 		BinaryDeserializer deserializer(plain_stream);
 		deserializer.Begin();
 		deserialized_secret = secret_manager.DeserializeSecret(deserializer, secret_path);
@@ -158,7 +177,8 @@ unique_ptr<CatalogEntry> VaultSecretGenerator::CreateDefaultEntryInternal(const 
 		                             "please remove the file, restart and try again. (error message: '%s')",
 		                             secret_path, error.RawMessage());
 	}
-	// plain 由守卫在作用域结束时 zeroize+free
+	// 卫生:明文副本即用即清
+	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(plaintext.data()), plaintext.size());
 
 	auto entry = make_uniq<SecretCatalogEntry>(std::move(deserialized_secret), catalog);
 	entry->secret->storage_mode = LOCAL_ENCRYPTED_STORAGE_NAME;
@@ -290,44 +310,16 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 	data_ptr_t plain = plain_stream.GetData();
 	idx_t plain_len = plain_stream.GetPosition();
 
-	// 2. 加密(AAD 绑定 secret 名)。cipher 由守卫持有:写盘 IO 失败同样释放(CR-H2 修复)
+	// 2. 加密落盘(公共助手:seal + 私有权限 + 原子 rename;P3-L2 去重)
 	string file_name = secret.GetName() + VAULT_FILE_SUFFIX;
 	string name = file_name.substr(0, file_name.size() - string(VAULT_FILE_SUFFIX).size());
-	VaultBufGuard cipher;
-	int rc = vault_seal(VaultProviderId(), name.c_str(), plain, plain_len, &cipher.buf);
+	VaultWriteEncryptedFile(fs, vault_path, name, plain, plain_len);
 
-	// 卫生:序列化明文缓冲立即清零(加密失败也清)。
-	// 清整个 capacity:MemoryStream 自增长会使 capacity > position,
-	// 有效长度外的空隙同样可能残留明文尾片(CR-H3 缓解)。
-	// 已知残余(设计债):增长过程中被释放的中间缓冲未清零,彻底方案需清零型 WriteStream。
+	// 卫生:序列化明文缓冲即用即清(清整个 capacity,CR-H3 缓解;
+	// 设计债:扩容中间缓冲未清零,彻底方案需清零型 WriteStream)
 	vault_zeroize_buf(plain, plain_stream.GetCapacity());
-
-	if (rc != 0) {
-		throw InvalidInputException("secret_vault: encrypt failed for secret '%s' (provider %s): %s", name,
-		                            VaultProviderName(VaultProviderId()), VaultLastError());
-	}
-
-	// 3. 密文原子落盘(临时文件 + rename,私有权限)
-	string file_path = fs.JoinPath(vault_path, name + VAULT_FILE_SUFFIX);
-	string temp_path = file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
-
-	fs.TryRemoveFile(file_path);
-	fs.TryRemoveFile(temp_path);
-
-	{
-		auto open_flags = FileFlags::FILE_FLAGS_WRITE;
-		open_flags |= FileFlags::FILE_FLAGS_PRIVATE;
-		open_flags |= FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
-
-		auto file_writer = BufferedFileWriter(fs, temp_path, open_flags);
-		file_writer.WriteData(const_data_ptr_t(cipher.buf.ptr), cipher.buf.len);
-		file_writer.Flush();
-	}
-
-	fs.MoveFile(temp_path, file_path);
 	// 写入成功后才锁定目录变更(诚实审查 LOW-3:失败不锁定)
 	has_written = true;
-	// cipher 由守卫在作用域结束时释放
 }
 
 void VaultSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) {

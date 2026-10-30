@@ -460,7 +460,7 @@ fn key_to_base32(key: &[u8; KEY_LEN]) -> String {
 }
 
 fn base32_to_key(code: &str) -> Option<[u8; KEY_LEN]> {
-    let cleaned: Vec<u8> = code
+    let mut cleaned: Vec<u8> = code
         .trim()
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
@@ -469,7 +469,7 @@ fn base32_to_key(code: &str) -> Option<[u8; KEY_LEN]> {
     let mut out = Vec::with_capacity(KEY_LEN);
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
-    for &c in &cleaned {
+    for &c in cleaned.iter() {
         let v = B32_ALPHABET.iter().position(|&a| a == c)? as u32;
         acc = (acc << 5) | v;
         bits += 5;
@@ -479,13 +479,18 @@ fn base32_to_key(code: &str) -> Option<[u8; KEY_LEN]> {
         }
     }
     if bits > 0 && (acc & ((1 << bits) - 1)) != 0 {
+        cleaned.zeroize();
         return None; // 尾部非零位 = 非规范编码
     }
     let mut key = [0u8; KEY_LEN];
     if out.len() != KEY_LEN {
+        cleaned.zeroize();
+        out.zeroize();
         return None;
     }
     key.copy_from_slice(&out);
+    cleaned.zeroize();
+    out.zeroize();
     Some(key)
 }
 
