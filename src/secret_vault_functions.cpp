@@ -413,7 +413,9 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 		throw InvalidInputException("secret_vault_export: %s", VaultLastError());
 	}
 	{
-		// P3-H2:信封承载全部 secret 明文(仅一次性码保护),权限不得弱于单文件密文
+		// P3-H2:信封承载全部 secret 明文(仅一次性码保护),权限不得弱于单文件密文。
+		// 幂等:先移除旧 bundle 再写(导出即重生成,避免 CREATE_NEW 撞残留文件)
+		fs.TryRemoveFile(bind.file);
 		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_PRIVATE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
 		auto writer = BufferedFileWriter(fs, bind.file, flags);
 		writer.WriteData(envelope.buf.ptr, envelope.buf.len);

@@ -41,16 +41,25 @@ python3 $WS/scripts/verify-at-rest.py "$HOME/.duckdb/stored_secrets_vault" m1 'M
 echo "[B4] 源文件默认保留:"; ls "$HOME/.duckdb/stored_secrets/" | wc -l
 N=$(SQLL "SET secret_vault_provider='env'; SELECT count(*) FROM duckdb_secrets() WHERE storage='local_encrypted' AND secret_string LIKE '%password=redacted%';")
 echo "[B5] 新进程读迁移件(脱敏) = $N (expect 2)"
-# delete_source 变体
-SQLL "SET secret_vault_provider='env'; CREATE PERSISTENT SECRET m3 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-3');" >/dev/null
-SQLL "CREATE PERSISTENT SECRET m3lf (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-3LF');" >/dev/null
-SQLL "SET secret_vault_provider='env'; SELECT migrated FROM secret_vault_migrate(delete_source := true);" >/dev/null
-echo "[B6] delete_source 后源目录:"; ls "$HOME/.duckdb/stored_secrets/" | wc -l
-# B7:migrate 同名冲突(P3-M2:默认 error,skip 计数)
-SQLL "CREATE PERSISTENT SECRET m1 (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-PLAIN-1');" >/dev/null
+# B6/B7(r11 重写):独立 HOME,避免与 B2 迁移残留的同名冲突
+new_home /tmp/vh-p3-b2
+SQLL "CREATE PERSISTENT SECRET d1 (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'D-1'); CREATE PERSISTENT SECRET d2 (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'D-2');"
+R=$(SQLL "SET secret_vault_provider='env'; SELECT migrated || '|' || skipped FROM secret_vault_migrate(delete_source := true);")
+echo "[B6] delete_source: migrated|skipped = $R (expect 2|0); 源目录剩 $(ls "$HOME/.duckdb/stored_secrets/" 2>/dev/null | wc -l) 个 (expect 0)"
+# B7:同名冲突——手工放回同名源文件(绕开 local_file CREATE 冲突)
+cp "$HOME/.duckdb/stored_secrets_vault/../stored_secrets_vault_nonexist" /dev/null 2>/dev/null || true
+SQLL "SET secret_vault_provider='env'; CREATE PERSISTENT SECRET d3 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'D-3');" >/dev/null
+echo "d1-PLAIN-COPY" > /dev/null
+# 用一个真实明文源:重建 d1 源文件的方式=在新 HOME2 造一份再拷回
+new_home /tmp/vh-p3-b3
+SQLL "CREATE PERSISTENT SECRET d1 (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'D-1');" >/dev/null
+SRC_FILE="$HOME/.duckdb/stored_secrets/d1.duckdb_secret"
+export HOME=/tmp/vh-p3-b2
+cp "$SRC_FILE" "$HOME/.duckdb/stored_secrets/d1.duckdb_secret"
+chmod 600 "$HOME/.duckdb/stored_secrets/d1.duckdb_secret"
 (SQLL "SET secret_vault_provider='env'; SELECT migrated FROM secret_vault_migrate();" 2>&1 | grep -m1 "already exists") && echo "[B7a] conflict default=error: PASS"
 R=$(SQLL "SET secret_vault_provider='env'; SELECT migrated || '|' || skipped FROM secret_vault_migrate(on_conflict := 'skip');")
-echo "[B7b] skip 结果 migrated|skipped = $R (expect 0|1)"
+echo "[B7b] skip: migrated|skipped = $R (expect 0|1)"
 
 echo "== C. rotate 跨口令(TP-33:旧口令失效新口令可读) =="
 new_home /tmp/vh-p3-c
