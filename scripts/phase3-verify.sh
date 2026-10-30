@@ -64,10 +64,11 @@ new_home /tmp/vh-p3-d
 $DUCKDB -unsigned -noheader -list -c "SET allow_extensions_metadata_mismatch=true; LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env'; CREATE PERSISTENT SECRET np IN local_encrypted (TYPE nats_rw, URL '$NATS_URL', USER 'admin', PASSWORD 's3cret-pass', SCOPE 'nats://nats_userpass');" >/dev/null
 echo "[D1] nats_rw secret 落盘密文断言:"
 python3 $WS/scripts/verify-at-rest.py "$HOME/.duckdb/stored_secrets_vault" np 's3cret-pass' | tail -1
+P3STREAM="p3_rt_$(date +%s)"
 LD2="SET allow_extensions_metadata_mismatch=true; LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env';"
 # 写入:不传 secret → scope 自动匹配加密存储里的凭证(TP-31)
-$DUCKDB -unsigned -noheader -list -c "$LD2 COPY (SELECT 'p3-hello' AS v) TO 'p3_rt' (FORMAT nats_rw, url '$NATS_URL', create_stream 'true', payload_column 'v');"
-N=$($DUCKDB -unsigned -noheader -list -c "$LD2 SELECT count(*) FROM nats_rw_scan('p3_rt', url := '$NATS_URL') WHERE decode(payload) = 'p3-hello';")
+$DUCKDB -unsigned -noheader -list -c "$LD2 COPY (SELECT 'p3-hello' AS v) TO '"$P3STREAM"' (FORMAT nats_rw, url '$NATS_URL', create_stream 'true', payload_column 'v');"
+N=$($DUCKDB -unsigned -noheader -list -c "$LD2 SELECT count(*) FROM nats_rw_scan('$P3STREAM', url := '$NATS_URL') WHERE decode(payload) = 'p3-hello';")
 echo "[D2] 写+读回(scope 匹配认证) count = $N (expect 1)"
 N=$($DUCKDB -unsigned -noheader -list -c "$LD2 SELECT count(*) FROM duckdb_secrets() WHERE name='np' AND storage='local_encrypted' AND secret_string LIKE '%s3cret-pass%';")
 echo "[D3] 脱敏不变 = $N (expect 0)"
@@ -89,7 +90,8 @@ PY
 # 实例 B:passphrase 体系(无 SECRET_VAULT_KEY)
 new_home /tmp/vh-p3-eb
 export SECRET_VAULT_PASSPHRASE=import-side-pass
-N=$(echo "$CODE" | $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SELECT imported FROM secret_vault_import('/tmp/p3bundle.svb');" 2>/dev/null)
+echo "[E3-debug] code head: ${CODE:0:8} len=${#CODE}"
+N=$(echo "$CODE" | $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SELECT imported FROM secret_vault_import('/tmp/p3bundle.svb');" 2>&1 | tail -2)
 echo "[E3] stdin 导入(B 无 KEY,passphrase 体系) imported = $N (expect 2)"
 N=$(SQLL "SET secret_vault_provider='passphrase'; SELECT count(*) FROM duckdb_secrets() WHERE name IN ('s1','s2') AND secret_string LIKE '%password=redacted%';")
 echo "[E4] B 用自己口令读取(脱敏) = $N (expect 2)"
