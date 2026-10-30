@@ -335,8 +335,8 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 		throw;
 	}
 	// 卫生:rotate 参数中的新口令/新密钥用后清零(不入残余内存)
-	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(bind.new_passphrase.data()), bind.new_passphrase.size());
-	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(bind.new_key.data()), bind.new_key.size());
+	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.new_passphrase.data())), bind.new_passphrase.size());
+	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.new_key.data())), bind.new_key.size());
 
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value::UBIGINT(rotated));
@@ -403,7 +403,7 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 			throw InvalidInputException("secret_vault_export: %s", VaultLastError());
 		}
 		// 卫生:码等价于信封密钥,用后即清(P3-M3)
-		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(bind.code.data()), bind.code.size());
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.code.data())), bind.code.size());
 	} else {
 		vault_transport_key_generate(transport);
 	}
