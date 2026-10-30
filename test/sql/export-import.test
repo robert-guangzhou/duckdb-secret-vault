@@ -23,9 +23,9 @@ SELECT secrets, transport_code FROM secret_vault_export('/tmp/p3exp.svb', code :
 2
 IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA
 
-# 错码导入 → AEAD 失败
+# 错码导入(全零键,A×52 为合法 base32 但非本封套之码)→ AEAD 失败
 statement error
-SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA');
+SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
 ----
 AEAD tag mismatch
 
