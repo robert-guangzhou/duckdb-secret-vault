@@ -3,10 +3,23 @@
 DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密**存储
 (存储名 `local_encrypted`),替换默认 `local_file` 的明文落盘。
 
-> **当前状态:阶段零(spike)+ 阶段一(Rust 加密核心)+ 阶段二(C++ 加密存储层)完成**
-> —— SecretStorage 接缝已验证;AES-256-GCM 核心单测/FFI/向量全绿;**落盘已是真密文**
-> (DSVLT 头 + AEAD,at-rest 字节断言通过),settings(secret_vault_provider/secret_vault_directory)
-> 与 `secret_vault_status()` 已实现。一次性封套 export/import 属阶段三。
+> **当前状态:阶段零~三完成(v0.1 功能面齐备)**
+> —— 加密存储(AES-256-GCM,keyring/passphrase/env 三 provider)+ 运维函数
+> (`secret_vault_migrate/rotate/export/import/status`)+ 一次性封套跨实例转移
+> (stdin 输码)+ nats_rw 真实联调验证。阶段四(威胁模型文档/社区提交)待做。
+>
+> ## 常用操作
+>
+> ```sql
+> LOAD secret_vault;
+> SET secret_vault_provider = 'env';            -- 或 keyring(默认)/passphrase
+> CREATE PERSISTENT SECRET s IN local_encrypted (TYPE s3, ...);
+> SELECT * FROM secret_vault_status();
+> SELECT * FROM secret_vault_migrate();          -- local_file 明文迁入(默认保留源)
+> SELECT * FROM secret_vault_rotate(new_provider := 'env');
+> SELECT * FROM secret_vault_export('/tmp/b.svb');  -- 一次性码显示于结果行
+> SELECT * FROM secret_vault_import('/tmp/b.svb');  -- 默认 stdin 输码;code := '...' 供自动化(会入 SQL 历史)
+> ```
 >
 > ⚠ 已知边界:文件损坏(篡改/坏密钥遗留)时 `CREATE OR REPLACE` 会因懒加载失败而报错,
 > 唯一恢复路径是**手动删除该 secret 文件后重建**(与 local_file 损坏文件语义一致)。
