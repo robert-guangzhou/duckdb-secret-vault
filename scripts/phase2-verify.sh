@@ -83,6 +83,35 @@ chmod 600 "$VAULT_DIR/tp10.duckdb_secret.vault"
 echo "== I. keyring 在无 dbus 容器 → 明确报错引导(TP-24b) =="
 ($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='keyring'; SELECT name FROM duckdb_secrets() WHERE name='tp10';" 2>&1 | tail -2) || true
 
+
+echo "== K. 目录切换成功路径(诚实审查 HIGH-1 回归:Rebind 后生成器必须可见新目录既有文件) =="
+export HOME=/tmp/vault-home-k
+rm -rf "$HOME"; mkdir -p "$HOME"
+DIR_PRE=$HOME/vault-pre
+# 进程1:默认目录为空 → SET 到 vault-pre → 创建 pre(落在 vault-pre)
+$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; SET secret_vault_directory='$DIR_PRE'; CREATE PERSISTENT SECRET pre IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'K-MARK');"
+ls "$DIR_PRE" | grep -q "pre.duckdb_secret.vault" && echo "[K1] file landed in switched dir: PASS"
+# 进程2:默认目录(空)→ SET 到 vault-pre → 既有文件必须立即可见(修复前不可见)
+N=$($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; SET secret_vault_directory='$DIR_PRE'; SELECT count(*) FROM duckdb_secrets() WHERE name='pre' AND storage='local_encrypted';")
+echo "[K2] pre visible after rebind in same process: count=$N (expect 1)"
+[ "$N" = "1" ] && echo "[K2] PASS" || echo "[K2] FAIL"
+
+echo "== L. TP-20 补全:passphrase 正路 + 错口令 e2e =="
+export HOME=/tmp/vault-home-l
+rm -rf "$HOME"; mkdir -p "$HOME"
+$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='passphrase'; CREATE PERSISTENT SECRET pw IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'L-MARK');"
+python3 $WS/scripts/verify-at-rest.py "$HOME/.duckdb/stored_secrets_vault" pw 'L-MARK' | tail -1
+N=$($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='passphrase'; SELECT count(*) FROM duckdb_secrets() WHERE name='pw' AND secret_string LIKE '%password=redacted%';")
+echo "[L1] passphrase roundtrip + redaction: count=$N (expect 1)"
+(SECRET_VAULT_PASSPHRASE=wrong-pass $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='passphrase'; SELECT name FROM duckdb_secrets() WHERE name='pw';" 2>&1 | tail -1) || true
+echo "[L2] wrong passphrase above: expect AEAD tag mismatch"
+
+echo "== M. TP-24b 修正:keyring provider 在无 dbus 容器经扩展 CREATE(加密路径)→ 明确报错 =="
+export HOME=/tmp/vault-home-m
+rm -rf "$HOME"; mkdir -p "$HOME"
+($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='keyring'; CREATE PERSISTENT SECRET kr IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'M');" 2>&1 | tail -1 | tee /tmp/m.err) || true
+grep -qi "keyring" /tmp/m.err && echo "[M] keyring-unavailable error surfaced via encrypt path: PASS" || echo "[M] FAIL: no keyring error"
+
 echo "== J. 清理 =="
 $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; DROP PERSISTENT SECRET tp10;" || true
 rm -f "$VAULT_DIR"/*.duckdb_secret.vault

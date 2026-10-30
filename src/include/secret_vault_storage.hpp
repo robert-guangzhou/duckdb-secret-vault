@@ -86,6 +86,7 @@ protected:
 private:
 	void ScanDirectory();
 
+	SecretManager &manager;
 	identifier_set_t persistent_secrets;
 	identifier_map_t<string> file_names;
 	string vault_path;

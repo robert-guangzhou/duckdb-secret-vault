@@ -88,67 +88,67 @@ unique_ptr<CatalogEntry> VaultSecretGenerator::CreateDefaultEntryInternal(const 
 	if (name_lu == file_names.end()) {
 		return nullptr;
 	}
-	// AAD 与路径都使用原始文件名(与 WriteSecret 的 secret.GetName() 一致)
+	// AAD 与路径都使用原始文件名(与 WriteSecret 的文件名基一致)
 	const string &orig_name = name_lu->second;
 
 	auto &fs = FileSystem::GetLocal(catalog.GetDatabase());
 	string secret_path = fs.JoinPath(vault_path, orig_name + VAULT_FILE_SUFFIX);
 
+	// 权限校验(不包装:让"incorrect permissions"原样可见,避免误导性外壳)
+	if (!LocalFileSystem::IsPrivateFile(secret_path, nullptr)) {
+		throw IOException("The vault secret file '%s' has incorrect permissions! Please set correct permissions or "
+		                  "remove the file",
+		                  secret_path);
+	}
+
+	// 整读密文
+	idx_t file_size;
+	unsafe_unique_array<data_t> cipher;
 	try {
-		if (!LocalFileSystem::IsPrivateFile(secret_path, nullptr)) {
-			throw IOException("The vault secret file '%s' has incorrect permissions! Please set correct "
-			                  "permissions or remove the file",
-			                  secret_path);
-		}
-
 		auto file_reader = BufferedFileReader(fs, secret_path.c_str());
-		idx_t file_size = file_reader.FileSize();
-		auto cipher = make_unsafe_uniq_array<data_t>(file_size);
+		file_size = file_reader.FileSize();
+		cipher = make_unsafe_uniq_array<data_t>(file_size);
 		file_reader.ReadData(cipher.get(), file_size);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		throw IOException("Failed to open or read the vault secret file: '%s'. (error message: '%s')", secret_path,
+		                  error.RawMessage());
+	}
 
-		VaultBuf plain {
-			nullptr, 0, 0};
-		int rc = vault_open(VaultProviderId(), orig_name.c_str(), cipher.get(), file_size, &plain);
-		if (rc != 0) {
-			throw SerializationException(
-			    "secret_vault: decrypt failed for secret '%s' (%s): %s — wrong provider/key, renamed file, or "
-			    "tampered file",
-			    orig_name, VaultProviderName(VaultProviderId()), VaultLastError());
-		}
+	// 解密:错密钥/错名/篡改统一 AEAD 失败(直接抛出,不重复包装)
+	VaultBuf plain {
+		nullptr, 0, 0};
+	int rc = vault_open(VaultProviderId(), orig_name.c_str(), cipher.get(), file_size, &plain);
+	if (rc != 0) {
+		throw SerializationException("secret_vault: decrypt failed for secret '%s' (provider %s): %s", orig_name,
+		                              VaultProviderName(VaultProviderId()), VaultLastError());
+	}
 
+	unique_ptr<BaseSecret> deserialized_secret;
+	try {
 		MemoryStream plain_stream(plain.ptr, plain.len);
 		BinaryDeserializer deserializer(plain_stream);
 		deserializer.Begin();
-		auto deserialized_secret = secret_manager.DeserializeSecret(deserializer, secret_path);
+		deserialized_secret = secret_manager.DeserializeSecret(deserializer, secret_path);
 		deserializer.End();
-
-		// 卫生:明文缓冲用后清零,再按契约释放
-		vault_zeroize_buf(plain.ptr, plain.len);
-		vault_free_buf(plain);
-
-		auto entry = make_uniq<SecretCatalogEntry>(std::move(deserialized_secret), catalog);
-		entry->secret->storage_mode = LOCAL_ENCRYPTED_STORAGE_NAME;
-		entry->secret->persist_type = SecretPersistType::PERSISTENT;
-
-		persistent_secrets.erase(secret_lu);
-		file_names.erase(name_lu);
-		return std::move(entry);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
-		switch (error.Type()) {
-		case ExceptionType::SERIALIZATION:
-			throw SerializationException(
-			    "Failed to load the vault secret file: '%s'. (error message: '%s')", secret_path,
-			    error.RawMessage());
-		case ExceptionType::IO:
-			throw IOException(
-			    "Failed to open the vault secret file: '%s'. Some other process may have removed it, please "
-			    "restart and try again. (error message: '%s')",
-			    secret_path, error.RawMessage());
-		default:
-			throw;
-		}
+		throw SerializationException("Failed to deserialize the vault secret file: '%s'. The file may be corrupt, "
+		                             "please remove the file, restart and try again. (error message: '%s')",
+		                             secret_path, error.RawMessage());
 	}
+
+	// 卫生:明文缓冲用后清零,再按契约释放
+	vault_zeroize_buf(plain.ptr, plain.len);
+	vault_free_buf(plain);
+
+	auto entry = make_uniq<SecretCatalogEntry>(std::move(deserialized_secret), catalog);
+	entry->secret->storage_mode = LOCAL_ENCRYPTED_STORAGE_NAME;
+	entry->secret->persist_type = SecretPersistType::PERSISTENT;
+
+	persistent_secrets.erase(secret_lu);
+	file_names.erase(name_lu);
+	return std::move(entry);
 }
 
 unique_ptr<CatalogEntry> VaultSecretGenerator::CreateDefaultEntry(CatalogTransaction transaction,
@@ -171,7 +171,7 @@ vector<Identifier> VaultSecretGenerator::GetDefaultEntries() {
 
 VaultSecretStorage::VaultSecretStorage(SecretManager &manager, DatabaseInstance &db_p, const string &name_p,
                                        const string &vault_path_p)
-    : CatalogSetSecretStorage(db_p, name_p, LOCAL_ENCRYPTED_STORAGE_OFFSET),
+    : CatalogSetSecretStorage(db_p, name_p, LOCAL_ENCRYPTED_STORAGE_OFFSET), manager(manager),
       vault_path(FileSystem::ExpandPath(vault_path_p, nullptr)) {
 	persistent = true;
 
@@ -223,6 +223,12 @@ void VaultSecretStorage::RebindDirectory(const string &new_path) {
 	}
 	vault_path = FileSystem::ExpandPath(new_path, nullptr);
 	ScanDirectory();
+	// 生成器持有扫描集的副本:目录变更后必须重建,否则同会话看不到
+	// 新目录中的既有文件(诚实审查 HIGH-1 修复;空状态下重建 CatalogSet 安全)
+	auto &catalog = Catalog::GetSystemCatalog(db);
+	secrets = make_uniq<CatalogSet>(catalog,
+	                                make_uniq<VaultSecretGenerator>(catalog, manager, persistent_secrets, file_names,
+	                                                                vault_path));
 }
 
 idx_t VaultSecretStorage::CountFilesOnDisk() {
@@ -284,7 +290,6 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 	}
 
 	// 3. 密文原子落盘(临时文件 + rename,私有权限)
-	has_written = true;
 	string file_path = fs.JoinPath(vault_path, name + VAULT_FILE_SUFFIX);
 	string temp_path = file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
 
@@ -303,6 +308,8 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 
 	vault_free_buf(cipher);
 	fs.MoveFile(temp_path, file_path);
+	// 写入成功后才锁定目录变更(诚实审查 LOW-3:失败不锁定)
+	has_written = true;
 }
 
 void VaultSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) {

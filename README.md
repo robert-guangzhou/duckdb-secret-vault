@@ -11,7 +11,16 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > ⚠ 已知边界:文件损坏(篡改/坏密钥遗留)时 `CREATE OR REPLACE` 会因懒加载失败而报错,
 > 唯一恢复路径是**手动删除该 secret 文件后重建**(与 local_file 损坏文件语义一致)。
 >
-> 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r6)
+> **语义与假设(必读)**:
+> - `secret_vault_provider` 是**进程级全局**设置:任一会话 SET 后对全进程生效,
+>   多会话并发设不同值属未定义行为(单会话/单调度进程场景设计)。
+> - 存储实例为**单 DatabaseInstance 假设**;同进程 attach 多个数据库并各自 LOAD 时,
+>   settings 与 status 仅反映最后注册的实例。
+> - 环境变量 `SECRET_VAULT_DIRECTORY` 可在 LOAD 前指定存储目录(默认
+>   `~/.duckdb/stored_secrets_vault`);运行期变更用 `SET secret_vault_directory`
+>   (仅空存储状态允许)。
+>
+> 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r7)
 
 ## 构建(minis Docker 模式,与 duckdb-nats-rw 同链路)
 
