@@ -61,10 +61,10 @@ unset SECRET_VAULT_PASSPHRASE
 
 echo "== D. nats_rw 真实联调(TP-30/31:类型无关 + scope 自动匹配) =="
 new_home /tmp/vh-p3-d
-$DUCKDB -unsigned -noheader -list -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env'; CREATE PERSISTENT SECRET np IN local_encrypted (TYPE nats_rw, URL '$NATS_URL', USER 'admin', PASSWORD 's3cret-pass', SCOPE 'nats://nats_userpass');" >/dev/null
+$DUCKDB -unsigned -noheader -list -c "SET allow_extensions_metadata_mismatch=true; LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env'; CREATE PERSISTENT SECRET np IN local_encrypted (TYPE nats_rw, URL '$NATS_URL', USER 'admin', PASSWORD 's3cret-pass', SCOPE 'nats://nats_userpass');" >/dev/null
 echo "[D1] nats_rw secret 落盘密文断言:"
 python3 $WS/scripts/verify-at-rest.py "$HOME/.duckdb/stored_secrets_vault" np 's3cret-pass' | tail -1
-LD2="LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env';"
+LD2="SET allow_extensions_metadata_mismatch=true; LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env';"
 # 写入:不传 secret → scope 自动匹配加密存储里的凭证(TP-31)
 $DUCKDB -unsigned -noheader -list -c "$LD2 COPY (SELECT 'p3-hello' AS v) TO 'p3_rt' (FORMAT nats_rw, url '$NATS_URL', create_stream 'true', payload_column 'v');"
 N=$($DUCKDB -unsigned -noheader -list -c "$LD2 SELECT count(*) FROM nats_rw_scan('p3_rt', url := '$NATS_URL') WHERE decode(payload) = 'p3-hello';")
