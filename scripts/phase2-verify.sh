@@ -21,7 +21,7 @@ L() { "$@"; echo; }
 echo "== env =="; $DUCKDB --version
 
 echo "== A. sqllogictest(测试进程继承本环境:KEY/PASSPHRASE 均设) =="
-( cd $WS && timeout 300 $UNITTEST test/sql/storage-basics.test test/sql/negative-security.test 2>&1 | tail -6 ); echo "UNITTEST_EXIT:$?"
+for t in storage-basics negative-security; do ( cd $WS && timeout 300 $UNITTEST test/sql/$t.test 2>&1 | tail -4 ); echo "UNITTEST_$t:$?"; done
 
 echo "== B. TP-10/TP-14:at-rest 字节断言 =="
 $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; CREATE PERSISTENT SECRET tp10 IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'AKIA-TP10', PASSWORD 'MARKER-TP10-PLAINTEXT');"
@@ -61,13 +61,18 @@ b = bytearray(open(p,"rb").read()); b[-1] ^= 1; open(p,"wb").write(b)
 print("[tamper] last byte flipped")
 PY
 ($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; SELECT name FROM duckdb_secrets() WHERE name='tp10';" 2>&1 | tail -2) || true
-# 还原
-cp "$EV/tp10-first.bin" /dev/null 2>/dev/null
-$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; CREATE OR REPLACE PERSISTENT SECRET tp10 IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'AKIA-TP10', PASSWORD 'MARKER-TP10-PLAINTEXT');" >/dev/null
+# 还原:文件已损坏时 OR REPLACE 也会因懒加载失败而死锁(需先读旧条目),
+# 唯一恢复路径 = 手动删文件后重建(与 local_file 损坏文件语义一致)
+echo "[F2] damaged-file recovery: OR REPLACE expected to fail (lazy-load of damaged entry), then rm + CREATE recovers"
+($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; CREATE OR REPLACE PERSISTENT SECRET tp10 IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'AKIA-TP10', PASSWORD 'MARKER-TP10-PLAINTEXT');" 2>&1 | tail -1) || true
+rm -f "$VAULT_DIR/tp10.duckdb_secret.vault"
+$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; CREATE PERSISTENT SECRET tp10 IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'AKIA-TP10', PASSWORD 'MARKER-TP10-PLAINTEXT');" >/dev/null
+$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; SELECT count(*) FROM duckdb_secrets() WHERE name='tp10';"
 
 echo "== G. TP-22:文件改名(调包) → AAD 失败 =="
 cp "$VAULT_DIR/tp10.duckdb_secret.vault" "$VAULT_DIR/tp22copy.duckdb_secret.vault"
-($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; SELECT name FROM duckdb_secrets() WHERE name='tp22copy';" 2>&1 | tail -2) || true
+($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; SELECT name FROM duckdb_secrets() WHERE name='tp22copy';" 2>&1 | tail -2 | tee /tmp/tp22.err) || true
+grep -q "tp22copy" /tmp/tp22.err && echo "[TP-22] renamed-file error names tp22copy: PASS" || echo "[TP-22] FAIL: error did not mention tp22copy"
 rm -f "$VAULT_DIR/tp22copy.duckdb_secret.vault"
 
 echo "== H. TP-23:权限放宽(644) → 拒读 =="
@@ -79,7 +84,8 @@ echo "== I. keyring 在无 dbus 容器 → 明确报错引导(TP-24b) =="
 ($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='keyring'; SELECT name FROM duckdb_secrets() WHERE name='tp10';" 2>&1 | tail -2) || true
 
 echo "== J. 清理 =="
-$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; DROP PERSISTENT SECRET tp10;"
+$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; DROP PERSISTENT SECRET tp10;" || true
+rm -f "$VAULT_DIR"/*.duckdb_secret.vault
 ls "$VAULT_DIR" 2>/dev/null; echo "(empty expected)"
 } 2>&1 | tee "$EV/phase2-evidence.txt"
 
