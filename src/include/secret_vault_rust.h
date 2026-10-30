@@ -30,6 +30,10 @@ extern "C" {
 
 #define PROVIDER_ENV 3
 
+#define ENV_FORMAT_VERSION 1
+
+#define ENV_HEADER_LEN (((8 + 2) + 2) + 12)
+
 typedef struct VaultBuf {
   uint8_t *ptr;
   uintptr_t len;
@@ -76,6 +80,28 @@ void vault_free_buf(struct VaultBuf buf);
 void vault_zeroize_buf(uint8_t *ptr, uintptr_t len);
 
 const char *secret_vault_core_version(void);
+
+int vault_transport_key_generate(uint8_t *out_key);
+
+int vault_envelope_seal(const uint8_t *key,
+                        const uint8_t *payload,
+                        uintptr_t payload_len,
+                        struct VaultBuf *out);
+
+int vault_envelope_open(const uint8_t *key,
+                        const uint8_t *envelope,
+                        uintptr_t len,
+                        struct VaultBuf *out);
+
+/**
+ * 传输钥 → base32 码(out 至少 56 字节,NUL 结尾)。
+ */
+int vault_key_to_base32(const uint8_t *key, char *out, uintptr_t out_len);
+
+/**
+ * base32 码 → 传输钥(非法/长度不符返回 1,不产出半成品)。
+ */
+int vault_base32_to_key(const char *code, uint8_t *out_key);
 
 #ifdef __cplusplus
 } /* extern "C" */
