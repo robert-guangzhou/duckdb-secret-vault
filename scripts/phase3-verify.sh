@@ -75,7 +75,7 @@ echo "[D3] 脱敏不变 = $N (expect 0)"
 echo "== E. 封套跨实例 + stdin 导入(TP-34)与负向(TP-35) =="
 new_home /tmp/vh-p3-ea
 SQLL "SET secret_vault_provider='env'; CREATE PERSISTENT SECRET s1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'ENV-MARK-1'); CREATE PERSISTENT SECRET s2 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'ENV-MARK-2');" >/dev/null
-CODE=$(SQLL "SET secret_vault_provider='env'; SELECT transport_code FROM secret_vault_export('/tmp/p3bundle.svb');")
+CODE=$(SQLL "SET secret_vault_provider='env'; SELECT transport_code FROM secret_vault_export('/tmp/p3bundle.svb');" | tail -1)
 echo "[E1] transport code captured: ${CODE:0:8}...(len=${#CODE}, expect 52)"
 echo "[E2] bundle at-rest:"
 python3 - <<PY
