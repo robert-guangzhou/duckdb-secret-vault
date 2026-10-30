@@ -24,19 +24,24 @@ SQL() { $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duck
 {
 echo "== env =="; $DUCKDB --version
 
-echo "== E1. RESET 一致性(CR-H5,已知缺陷行为登记) =="
-SQL "SET secret_vault_provider='env';" >/dev/null
-echo "[E1-1] after SET env: current_setting = $(SQL "SELECT current_setting('secret_vault_provider');")"
-SQL "RESET secret_vault_provider;" >/dev/null 2>&1 || true
-echo "[E1-2] after RESET: current_setting = $(SQL "SELECT current_setting('secret_vault_provider');") (expect shows 'keyring')"
-# RESET 后 CREATE:若实际 provider 已回 keyring(无 dbus)必报 keyring 错误;若仍 env 则成功
-SQL "CREATE PERSISTENT SECRET r1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'E1');" >/dev/null 2>&1 && RC=ok || RC=err
-echo "[E1-3] CREATE after RESET: $RC (ok ⇒ 实际 provider 仍是 env ⇒ 与显示值脱钩)"
-python3 - <<'PY'
-b = open("/tmp/vault-home-edge/.duckdb/stored_secrets_vault/r1.duckdb_secret.vault","rb").read()
-print(f"[E1-4] file provider byte = {b[10]} (3=env, 1=keyring) —— 字节级证据")
-PY
-SQL "DROP PERSISTENT SECRET r1;" >/dev/null
+echo "== E1. RESET 一致性(CR-H5,已知缺陷行为登记;单进程内完整序列) =="
+$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension';
+  SET secret_vault_provider='env';
+  SELECT 'after-set' AS phase, current_setting('secret_vault_provider') AS shown;
+  RESET secret_vault_provider;
+  SELECT 'after-reset' AS phase, current_setting('secret_vault_provider') AS shown;
+  CREATE PERSISTENT SECRET r1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'E1');
+  SELECT 'after-reset-create' AS phase, 'CREATE-SUCCEEDED' AS outcome;"
+python3 - <<'PY2'
+import os
+p = "/tmp/vault-home-edge/.duckdb/stored_secrets_vault/r1.duckdb_secret.vault"
+if os.path.exists(p):
+    b = open(p,"rb").read()
+    print(f"[E1-byte] file provider byte = {b[10]} (3=env,1=keyring) —— 显示 keyring 而实际 env ⇒ 脱钩坐实")
+else:
+    print("[E1-byte] r1 file absent ⇒ CREATE failed ⇒ 无脱钩(keyring 实际生效)")
+PY2
+SQL "SET secret_vault_provider='env'; DROP PERSISTENT SECRET r1;" >/dev/null 2>&1 || true
 
 echo "== E2. 反序列化失败路径(CR-H1 触发条件:AEAD 有效、内容非序列化) =="
 rm -rf /tmp/craft && cargo new --lib /tmp/craft -q
@@ -64,7 +69,7 @@ pub fn main_rs(dir: &str) {
 RS
 mkdir -p /tmp/craft/src/bin && printf 'fn main(){ let d = std::env::args().nth(1).unwrap(); craft::main_rs(&d); }\n' > /tmp/craft/src/bin/craft.rs
 (cd /tmp/craft && timeout 300 cargo run --bin craft -- "$VAULT_DIR" 2>&1 | tail -1)
-(SQL "SELECT name FROM duckdb_secrets() WHERE name='badtype';" 2>&1 | grep -m1 -E "deserialize|Error" ) || true
+$D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; SELECT name FROM duckdb_secrets() WHERE name='badtype';" 2>&1 | grep -m1 -E "Error" || true
 echo "[E2-2] 上行应为 Failed to deserialize(路径已触发;该路径当前存在 plain 缓冲泄漏=CR-H1,泄漏本体需 ASan 方可量化)"
 rm -f "$VAULT_DIR/badtype.duckdb_secret.vault"
 
