@@ -41,6 +41,7 @@ struct VaultBufGuard {
 };
 
 //! 全局存储实例(单 DB 假设,README 语义节;settings/status/函数层经此触达)
+class VaultSecretStorage;
 VaultSecretStorage *GetVaultStorage();
 void SetVaultStorage(VaultSecretStorage *storage);
 
