@@ -91,8 +91,6 @@ static void SecretVaultDirectorySetting(ClientContext &context, SetScope scope, 
 // ---- secret_vault_status() 表函数 ----
 
 struct VaultStatusData : public TableFunctionData {
-	std::atomic<bool> emitted {false};
-
 	static unique_ptr<FunctionData> Create(ClientContext &context, TableFunctionBindInput &input,
 	                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 		names.emplace_back("storage");
@@ -103,18 +101,25 @@ struct VaultStatusData : public TableFunctionData {
 		return_types.emplace_back(LogicalType::VARCHAR);
 		names.emplace_back("files");
 		return_types.emplace_back(LogicalType::UBIGINT);
-		return make_uniq<VaultStatusData>();
+		return nullptr;
+	}
+};
+
+struct VaultStatusGlobal : public GlobalTableFunctionState {
+	bool done = false;
+	static unique_ptr<GlobalTableFunctionState> Init(ClientContext &context, TableFunctionInitInput &input) {
+		return make_uniq<VaultStatusGlobal>();
 	}
 };
 
 static void VaultStatusExecute(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &status = data.bind_data->Cast<VaultStatusData>();
+	auto &global = data.global_state->Cast<VaultStatusGlobal>();
 	// 表函数协议:发过一行后必须发空块终止,否则查询永不结束
-	bool already = status.emitted.exchange(true);
-	if (already) {
+	if (global.done) {
 		output.SetCardinality(0);
 		return;
 	}
+	global.done = true;
 	output.SetCardinality(1);
 	if (g_storage) {
 		output.SetValue(0, 0, Value(LOCAL_ENCRYPTED_STORAGE_NAME));
@@ -156,7 +161,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::VARCHAR, Value(), SecretVaultDirectorySetting, SetScope::SESSION);
 
 	// secret_vault_status()
-	TableFunction status_fn("secret_vault_status", {}, VaultStatusExecute, VaultStatusData::Create);
+	TableFunction status_fn("secret_vault_status", {}, VaultStatusExecute, VaultStatusData::Create,
+	                        VaultStatusGlobal::Init);
 	loader.RegisterFunction(status_fn);
 }
 
