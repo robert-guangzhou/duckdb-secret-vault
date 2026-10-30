@@ -16,6 +16,8 @@ argon2 = "0.5"
 zeroize = "1"
 rand = "0.8"
 base64 = "0.22"
+hkdf = "0.12"
+sha2 = "0.10"
 keyring = { version = "4", features = [
     "v1",
     "apple-native-keyring-store",

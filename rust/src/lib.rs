@@ -17,7 +17,9 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use hkdf::Hkdf;
 use rand::{RngCore, rngs::OsRng};
+use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
 // ==== 常量与文件格式 ====
@@ -108,9 +110,29 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8;
             Ok(key)
         }
         PROVIDER_PASSPHRASE => {
-            let pass = Zeroizing::new(std::env::var(ENV_PASSPHRASE).map_err(|_| {
-                VaultError::KeyUnavailable(format!("{ENV_PASSPHRASE} not set and no interactive prompt in this build"))
-            })?);
+            // 取口令优先级:env(无人值守)→ 交互 stdin(tty 时提示;
+            // 回显关闭需 termios,当前版本明文回显,记录为已知限制)。
+            let pass = match std::env::var(ENV_PASSPHRASE) {
+                Ok(p) => Zeroizing::new(p),
+                Err(_) => {
+                    use std::io::IsTerminal;
+                    if std::io::stdin().is_terminal() {
+                        eprint!("secret_vault: enter passphrase: ");
+                        let mut line = String::new();
+                        std::io::stdin()
+                            .read_line(&mut line)
+                            .map_err(|e| VaultError::KeyUnavailable(format!("stdin: {e}")))?;
+                        if line.trim().is_empty() {
+                            return Err(VaultError::KeyUnavailable("empty passphrase".into()));
+                        }
+                        Zeroizing::new(line.trim().to_string())
+                    } else {
+                        return Err(VaultError::KeyUnavailable(format!(
+                            "{ENV_PASSPHRASE} not set and stdin is not interactive"
+                        )));
+                    }
+                }
+            };
             let params = Params::new(ARGON2_M_KIB, ARGON2_T, ARGON2_P, Some(KEY_LEN))
                 .map_err(|e| VaultError::Io(format!("argon2 params: {e}")))?;
             let a2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -347,6 +369,205 @@ pub extern "C" fn secret_vault_core_version() -> *const c_char {
     VERSION.as_ptr() as *const c_char
 }
 
+// ==== 一次性传输封套(plan 3.5:export/import) ====
+//! 封套与 per-secret 文件格式完全独立:transport key(一次性 256-bit)经
+//! HKDF-SHA256 域分隔派生封套密钥,加密「已解密的 secret 序列化明文」整包。
+//! 导入方解开封套后用本机 provider 重新 seal 落盘——transport key 与任何
+//! 实例运行时密钥解耦。
+
+pub const ENV_MAGIC: &[u8; 8] = b"DSVLTENV";
+pub const ENV_FORMAT_VERSION: u16 = 1;
+pub const ENV_HEADER_LEN: usize = 8 + 2 + 2 + 12; // magic + version + reserved + nonce
+const HKDF_INFO: &[u8] = b"secret_vault.envelope.v1";
+
+fn envelope_key(transport: &[u8; KEY_LEN]) -> Zeroizing<[u8; KEY_LEN]> {
+    let hk = Hkdf::<Sha256>::from_prk(transport).expect("prk len");
+    let mut okm = Zeroizing::new([0u8; KEY_LEN]);
+    hk.expand(HKDF_INFO, okm.as_mut()).expect("okm len");
+    okm
+}
+
+/// 打包加密:payload(调用方组装的 entries)→ 封套字节。
+pub fn envelope_seal(transport: &[u8; KEY_LEN], payload: &[u8]) -> VaultResult<Vec<u8>> {
+    let key = envelope_key(transport);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*key));
+    let nonce_bytes = Aes256Gcm::generate_nonce(&mut OsRng);
+
+    let mut out = Vec::with_capacity(ENV_HEADER_LEN + payload.len() + TAG_LEN);
+    out.extend_from_slice(ENV_MAGIC);
+    out.extend_from_slice(&ENV_FORMAT_VERSION.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    out.extend_from_slice(nonce_bytes.as_slice());
+    debug_assert_eq!(out.len(), ENV_HEADER_LEN);
+
+    let ct = cipher
+        .encrypt(&nonce_bytes, Payload { msg: payload, aad: &out[..ENV_HEADER_LEN] })
+        .map_err(|_| VaultError::OpenFailed)?;
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// 解开封套:错 transport key/篡改统一 OpenFailed。
+pub fn envelope_open(transport: &[u8; KEY_LEN], envelope: &[u8]) -> VaultResult<Vec<u8>> {
+    if envelope.len() < ENV_HEADER_LEN + TAG_LEN {
+        return Err(VaultError::BadFormat(format!(
+            "envelope too small ({} bytes, need at least {})",
+            envelope.len(),
+            ENV_HEADER_LEN + TAG_LEN
+        )));
+    }
+    if &envelope[0..8] != ENV_MAGIC {
+        return Err(VaultError::BadFormat("bad envelope magic (not a vault envelope)".into()));
+    }
+    let version = u16::from_be_bytes([envelope[8], envelope[9]]);
+    if version != ENV_FORMAT_VERSION {
+        return Err(VaultError::BadFormat(format!("unsupported envelope version {version}")));
+    }
+    let nonce = Nonce::from_slice(&envelope[12..24]);
+
+    let key = envelope_key(transport);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*key));
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &envelope[ENV_HEADER_LEN..],
+                aad: &envelope[..ENV_HEADER_LEN],
+            },
+        )
+        .map_err(|_| VaultError::OpenFailed)
+}
+
+// RFC 4648 base32(无填充,A-Z2-7):长密钥码的可抄录表示
+const B32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+fn key_to_base32(key: &[u8; KEY_LEN]) -> String {
+    let mut out = String::with_capacity(56);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in key {
+        acc = (acc << 8) | b as u32;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(B32_ALPHABET[((acc >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        out.push(B32_ALPHABET[((acc << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
+}
+
+fn base32_to_key(code: &str) -> Option<[u8; KEY_LEN]> {
+    let cleaned: Vec<u8> = code
+        .trim()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .map(|c| c.to_ascii_uppercase() as u8)
+        .collect();
+    let mut out = Vec::with_capacity(KEY_LEN);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &c in &cleaned {
+        let v = B32_ALPHABET.iter().position(|&a| a == c)? as u32;
+        acc = (acc << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    if bits > 0 && (acc & ((1 << bits) - 1)) != 0 {
+        return None; // 尾部非零位 = 非规范编码
+    }
+    let mut key = [0u8; KEY_LEN];
+    if out.len() != KEY_LEN {
+        return None;
+    }
+    key.copy_from_slice(&out);
+    Some(key)
+}
+
+#[no_mangle]
+pub extern "C" fn vault_transport_key_generate(out_key: *mut u8) -> c_int {
+    if out_key.is_null() {
+        return set_last_error_msg("out_key is null");
+    }
+    unsafe {
+        let slice = std::slice::from_raw_parts_mut(out_key, KEY_LEN);
+        OsRng.fill_bytes(slice);
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn vault_envelope_seal(
+    key: *const u8,
+    payload: *const u8,
+    payload_len: usize,
+    out: *mut VaultBuf,
+) -> c_int {
+    if key.is_null() || payload.is_null() || payload_len == 0 {
+        return set_last_error_msg("envelope seal: null/empty input");
+    }
+    let transport = match unsafe { std::slice::from_raw_parts(key, KEY_LEN) }.try_into() {
+        Ok(k) => k,
+        Err(_) => return set_last_error_msg("transport key length mismatch"),
+    };
+    let pt = unsafe { std::slice::from_raw_parts(payload, payload_len) };
+    wrap_result(envelope_seal(&transport, pt), out)
+}
+
+#[no_mangle]
+pub extern "C" fn vault_envelope_open(key: *const u8, envelope: *const u8, len: usize, out: *mut VaultBuf) -> c_int {
+    if key.is_null() || envelope.is_null() || len == 0 {
+        return set_last_error_msg("envelope open: null/empty input");
+    }
+    let transport = match unsafe { std::slice::from_raw_parts(key, KEY_LEN) }.try_into() {
+        Ok(k) => k,
+        Err(_) => return set_last_error_msg("transport key length mismatch"),
+    };
+    let env = unsafe { std::slice::from_raw_parts(envelope, len) };
+    wrap_result(envelope_open(&transport, env), out)
+}
+
+/// 传输钥 → base32 码(out 至少 56 字节,NUL 结尾)。
+#[no_mangle]
+pub extern "C" fn vault_key_to_base32(key: *const u8, out: *mut c_char, out_len: usize) -> c_int {
+    if key.is_null() || out.is_null() || out_len < 56 {
+        return set_last_error_msg("key_to_base32: bad buffer");
+    }
+    let transport = match unsafe { std::slice::from_raw_parts(key, KEY_LEN) }.try_into() {
+        Ok(k) => k,
+        Err(_) => return set_last_error_msg("transport key length mismatch"),
+    };
+    let code = key_to_base32(&transport);
+    unsafe {
+        std::ptr::copy_nonoverlapping(code.as_ptr(), out as *mut u8, code.len());
+        *out.add(code.len()) = 0;
+    }
+    0
+}
+
+/// base32 码 → 传输钥(非法/长度不符返回 1,不产出半成品)。
+#[no_mangle]
+pub extern "C" fn vault_base32_to_key(code: *const c_char, out_key: *mut u8) -> c_int {
+    let code = match unsafe { CStr::from_ptr(code) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return set_last_error_msg("code is not valid UTF-8"),
+    };
+    match base32_to_key(code) {
+        Some(k) => {
+            unsafe {
+                std::ptr::copy_nonoverlapping(k.as_ptr(), out_key, KEY_LEN);
+            }
+            0
+        }
+        None => set_last_error_msg("invalid transport code (bad base32 or wrong length)"),
+    }
+}
+
 // ==== 单元测试(阶段一出口判据:全部真实运行) ====
 
 #[cfg(test)]
@@ -465,6 +686,72 @@ mod tests {
         assert!(v.iter().all(|&b| b == 0), "vault_zeroize_buf must zero the whole buffer");
         // 空指针/零长不崩溃
         vault_zeroize_buf(std::ptr::null_mut(), 0);
+    }
+
+    // ==== 封套(阶段三)====
+
+    fn tp_key() -> [u8; KEY_LEN] {
+        let mut k = [0u8; KEY_LEN];
+        OsRng.fill_bytes(&mut k);
+        k
+    }
+
+    #[test]
+    fn tp0e_envelope_roundtrip_and_negatives() {
+        let k = tp_key();
+        let payload = b"entry1\0serialized-blob-1;entry2\0serialized-blob-2";
+        let env = envelope_seal(&k, payload).unwrap();
+        assert_eq!(&env[0..8], ENV_MAGIC);
+        assert_eq!(env.len(), ENV_HEADER_LEN + payload.len() + TAG_LEN);
+        assert_eq!(envelope_open(&k, &env).unwrap(), payload);
+
+        // 错 transport key → AEAD 失败
+        let wrong = tp_key();
+        assert!(matches!(envelope_open(&wrong, &env), Err(VaultError::OpenFailed)));
+        // 篡改 1 字节 → 失败
+        let mut bad = env.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(matches!(envelope_open(&k, &bad), Err(VaultError::OpenFailed)));
+        // 坏 magic / 过短
+        let mut m = env.clone();
+        m[0] = b'X';
+        assert!(matches!(envelope_open(&k, &m), Err(VaultError::BadFormat(_))));
+        assert!(matches!(envelope_open(&k, &env[..10]), Err(VaultError::BadFormat(_))));
+    }
+
+    #[test]
+    fn tp0e_hkdf_domain_separation() {
+        // 同 transport key 派生确定;封套密钥 ≠ 原始 transport key(域分隔)
+        let k = tp_key();
+        let e1 = envelope_key(&k);
+        let e2 = envelope_key(&k);
+        assert_eq!(*e1, *e2);
+        assert_ne!(*e1, k, "HKDF must derive a distinct key");
+    }
+
+    #[test]
+    fn tp0e_base32_roundtrip_and_validation() {
+        let k = tp_key();
+        let code = key_to_base32(&k);
+        assert_eq!(code.len(), 56, "32 bytes -> 56 base32 chars");
+        assert!(code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
+        assert_eq!(base32_to_key(&code).unwrap(), k);
+        // 分隔符/空白容忍
+        let grouped: String = code
+            .chars()
+            .enumerate()
+            .fold(String::new(), |mut acc, (i, c)| {
+                if i > 0 && i % 8 == 0 {
+                    acc.push('-');
+                }
+                acc.push(c);
+                acc
+            });
+        assert_eq!(base32_to_key(&grouped).unwrap(), k);
+        // 非法字符/长度拒绝
+        assert!(base32_to_key("NOT-A-VALID-CODE-!!!").is_none());
+        assert!(base32_to_key("AAAA").is_none());
     }
 
     // AES-256-GCM 官方向量(NIST AES-256-GCM PDF,Test Case 16)
