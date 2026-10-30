@@ -734,7 +734,7 @@ mod tests {
     fn tp0e_base32_roundtrip_and_validation() {
         let k = tp_key();
         let code = key_to_base32(&k);
-        assert_eq!(code.len(), 56, "32 bytes -> 56 base32 chars");
+        assert_eq!(code.len(), 52, "32 bytes = 256 bits -> ceil(256/5) = 52 base32 chars");
         assert!(code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()));
         assert_eq!(base32_to_key(&code).unwrap(), k);
         // 分隔符/空白容忍
