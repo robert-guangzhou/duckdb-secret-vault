@@ -5,12 +5,17 @@
 #include "secret_vault_storage.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
+
+#include <atomic>
+#include <cstdlib>
 
 namespace duckdb {
 
@@ -59,6 +64,62 @@ static void RegisterVaultTestSecretType(ExtensionLoader &loader) {
 	loader.RegisterFunction(function);
 }
 
+// ---- 全局存储实例指针（单 DB 假设；供 settings 回调触达）----
+static VaultSecretStorage *g_storage = nullptr;
+
+// ---- settings ----
+
+static void SecretVaultProviderSetting(ClientContext &context, SetScope scope, Value &parameter) {
+	uint8_t id;
+	if (!TryParseProviderName(parameter.ToString(), id)) {
+		throw InvalidInputException(
+		    "secret_vault: secret_vault_provider must be one of 'keyring', 'passphrase', 'env' (got '%s')",
+		    parameter.ToString());
+	}
+	SetVaultProviderGlobal(id);
+	parameter = Value(VaultProviderName(id));
+}
+
+static void SecretVaultDirectorySetting(ClientContext &context, SetScope scope, Value &parameter) {
+	if (!g_storage) {
+		throw InvalidInputException("secret_vault: storage not initialized");
+	}
+	g_storage->RebindDirectory(parameter.ToString());
+	parameter = Value("ok");
+}
+
+// ---- secret_vault_status() 表函数 ----
+
+struct VaultStatusData : public TableFunctionData {
+	static unique_ptr<FunctionData> Create(ClientContext &context, TableFunctionBindInput &input,
+	                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
+		names.emplace_back("storage");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("directory");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("provider");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		names.emplace_back("files");
+		return_types.emplace_back(LogicalType::UBIGINT);
+		return nullptr;
+	}
+};
+
+static void VaultStatusExecute(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	output.SetCardinality(1);
+	if (g_storage) {
+		output.SetValue(0, 0, Value(LOCAL_ENCRYPTED_STORAGE_NAME));
+		output.SetValue(1, 0, Value(g_storage->PublicDirectory()));
+		output.SetValue(2, 0, Value(string(VaultProviderName(VaultProviderId()))));
+		output.SetValue(3, 0, Value::UBIGINT(g_storage->CountFilesOnDisk()));
+	} else {
+		output.SetValue(0, 0, Value("not-initialized"));
+		output.SetValue(1, 0, Value());
+		output.SetValue(2, 0, Value());
+		output.SetValue(3, 0, Value());
+	}
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	// 版本函数（Rust core 版本，验证 corrosion+cbindgen+staticlib 全链路）
 	auto version_function = ScalarFunction("secret_vault_version", {}, LogicalType::VARCHAR, SecretVaultVersionFun);
@@ -66,13 +127,28 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	RegisterVaultTestSecretType(loader);
 
-	// 核心 spike：注册 local_encrypted SecretStorage
-	// （SecretManager::LoadSecretStorage 为 DUCKDB_API 公开扩展点）
 	auto &db = loader.GetDatabaseInstance();
 	auto &secret_manager = *DBConfig::GetConfig(db).secret_manager;
-	auto vault_path = VaultSecretStorage::DefaultVaultPath(db);
-	secret_manager.LoadSecretStorage(make_uniq<VaultSecretStorage>(secret_manager, db, LOCAL_ENCRYPTED_STORAGE_NAME,
-	                                                               vault_path));
+
+	// 核心:注册 local_encrypted SecretStorage(SecretManager::LoadSecretStorage 为公开扩展点)
+	auto &config = DBConfig::GetConfig(db);
+	const char *dir_env = std::getenv("SECRET_VAULT_DIRECTORY");
+	string vault_path = dir_env ? string(dir_env) : VaultSecretStorage::DefaultVaultPath(db);
+	auto storage = make_uniq<VaultSecretStorage>(secret_manager, db, LOCAL_ENCRYPTED_STORAGE_NAME, vault_path);
+	g_storage = storage.get();
+	secret_manager.LoadSecretStorage(std::move(storage));
+
+	// settings(经 DBConfig::AddExtensionOption;SET/RESET/duckdb_settings 可见)
+	config.AddExtensionOption("secret_vault_provider",
+	                          "Key provider for the local_encrypted secret storage: keyring | passphrase | env",
+	                          LogicalType::VARCHAR, Value("keyring"), SecretVaultProviderSetting, SetScope::SESSION);
+	config.AddExtensionOption("secret_vault_directory",
+	                          "Directory for local_encrypted secret files (changeable only while storage is empty)",
+	                          LogicalType::VARCHAR, Value(), SecretVaultDirectorySetting, SetScope::SESSION);
+
+	// secret_vault_status()
+	TableFunction status_fn("secret_vault_status", {}, VaultStatusExecute, VaultStatusData::Create);
+	loader.RegisterFunction(status_fn);
 }
 
 void SecretVaultExtension::Load(ExtensionLoader &loader) {

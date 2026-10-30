@@ -1,0 +1,44 @@
+# name: test/sql/negative-security.test
+# description: 阶段二 —— 加密存储负向:缺口令/provider 不匹配/非法 provider 名/目录变更限制(TP-20/TP-24 SQL 面)
+# group: [sql]
+# plan: plans/secret-vault-duckdb-extension-test-plan.md — TP-20/24
+# 运行前置(runner 负责):SECRET_VAULT_KEY 与 SECRET_VAULT_PASSPHRASE 均已设(便于构造 provider 不匹配);
+#   文件篡改/改名/权限负向(TP-21/22/23)由 scripts/phase2-verify.sh 的 CLI 步骤覆盖。
+
+require secret_vault
+
+# 非法 provider 名 → 明确报错
+statement error
+SET secret_vault_provider = 'kms';
+----
+secret_vault_provider must be one of
+
+# env provider 但未设 SECRET_VAULT_KEY(runner 在子进程不注入)由 phase2-verify.sh CLI 覆盖;
+# 此处先验证:passphrase 缺口令错误文本(通过取消 SECRET_VAULT_PASSPHRASE 不可行——env 为进程级,
+# 故该场景同样由 CLI 覆盖;本文件专注可在 SQL 内表达的场景)。
+
+# provider 不匹配:env 加密的文件按 passphrase 打开 → BadFormat 明确报错
+statement ok
+SET secret_vault_provider = 'env';
+
+statement ok
+CREATE PERSISTENT SECRET mm IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MARKER-MM');
+
+# 触发懒加载需新连接;SQL 内通过 DROP+重建同名前的状态函数与直接读取验证:
+# 在本连接内该 secret 已在 catalog,切换 provider 后重读文件路径 = 重新 LOAD 不可行,
+# 故 provider 不匹配的解密失败路径同样由 CLI(新进程)覆盖。此处保留 SQL 可验证部分:
+
+# 目录变更限制:已有 secret 时不得变更 secret_vault_directory
+statement error
+SET secret_vault_directory = '/tmp/should-fail-vault-dir';
+----
+cannot change secret_vault_directory after secrets exist
+
+# 错误信息不含密钥材料:provider 名回显合法值
+query T
+SELECT current_setting('secret_vault_provider');
+----
+env
+
+statement ok
+DROP PERSISTENT SECRET mm;

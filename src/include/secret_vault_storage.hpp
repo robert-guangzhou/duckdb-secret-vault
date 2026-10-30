@@ -4,6 +4,8 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/secret/secret_storage.hpp"
 
+#include "secret_vault_rust.h" // PROVIDER_* / VaultBuf / vault_* C ABI
+
 namespace duckdb {
 
 //! 对外存储名:CREATE PERSISTENT SECRET ... IN local_encrypted / duckdb_secrets().storage
@@ -15,13 +17,29 @@ constexpr int64_t LOCAL_ENCRYPTED_STORAGE_OFFSET = 21;
 //! 文件名:<name>.duckdb_secret.vault
 constexpr const char *VAULT_FILE_SUFFIX = ".duckdb_secret.vault";
 
-//! VaultSecretStorage 的懒加载生成器(镜像 DefaultSecretGenerator;
-//! 路径/扩展名/存储名替换为 vault 侧)。SPIKE 阶段文件为 DuckDB 原生
-//! 序列化明文;阶段二替换为「解密 → 内存反序列化」。
+//===--------------------------------------------------------------------===//
+// 全局配置(经 DuckDB settings 暴露,见 secret_vault_extension.cpp)
+//===--------------------------------------------------------------------===//
+
+//! 当前密钥来源 id(PROVIDER_KEYRING/PASSPHRASE/ENV);SET secret_vault_provider 更新
+uint8_t VaultProviderId();
+void SetVaultProviderGlobal(uint8_t id);
+const char *VaultProviderName(uint8_t id);
+//! 密钥来源合法名 → id;非法名返回 false
+bool TryParseProviderName(const string &name, uint8_t &out);
+//! 拷贝 Rust 侧最近一次错误(线程本地,须立即拷贝——见 secret_vault_rust.h 契约)
+string VaultLastError();
+
+//===--------------------------------------------------------------------===//
+// 存储与懒加载生成器
+//===--------------------------------------------------------------------===//
+
+//! VaultSecretStorage 的懒加载生成器:读 `.duckdb_secret.vault` 密文 →
+//! vault_open 解密(AAD 绑定原始文件名) → MemoryStream 反序列化。
 class VaultSecretGenerator : public DefaultGenerator {
 public:
 	VaultSecretGenerator(Catalog &catalog, SecretManager &secret_manager, identifier_set_t &persistent_secrets,
-	                     string vault_path_p);
+	                     identifier_map_t<string> &file_names, string vault_path_p);
 
 public:
 	unique_ptr<CatalogEntry> CreateDefaultEntry(CatalogTransaction transaction, const Identifier &entry_name) override;
@@ -37,26 +55,43 @@ private:
 	SecretManager &secret_manager;
 	mutex lock;
 	identifier_set_t persistent_secrets;
+	//! 归一化 Identifier → 原始文件名(无后缀):AAD 与路径都以原始文件名为准,
+	//! 避免大小写归一化导致的 AAD 不一致
+	identifier_map_t<string> file_names;
 	string vault_path;
 };
 
-//! 持久化 secret 存储(镜像 LocalFileSecretStorage 的目录扫描/懒加载/
-//! 临时文件+原子 rename/私有权限行为)。SPIKE:落盘为明文序列化;
-//! 阶段二起 WriteSecret/生成器走 Rust 加解密 FFI(Dev Plan 3.2/3.3)。
+//! 加密持久化 secret 存储:WriteSecret = 序列化→vault_seal→密文原子落盘;
+//! 懒加载 = vault_open→反序列化;权限/原子 rename 行为对齐 LocalFileSecretStorage。
 class VaultSecretStorage : public CatalogSetSecretStorage {
 public:
 	VaultSecretStorage(SecretManager &manager, DatabaseInstance &db, const string &name, const string &vault_path);
 
-	//! 默认目录:~/.duckdb/stored_secrets_vault(阶段二加 secret_vault_directory 设置)
 	static string DefaultVaultPath(DatabaseInstance &db);
+
+	//! SET secret_vault_directory:仅在尚未加载/写入任何 secret 时允许(否则须重启)
+	void RebindDirectory(const string &new_path);
+
+	//! 诊断:当前目录下 .vault 文件数
+	idx_t CountFilesOnDisk();
+	//! 诊断:当前存储目录
+	const string &PublicDirectory() {
+		return vault_path;
+	}
 
 protected:
 	void WriteSecret(const BaseSecret &secret, OnCreateConflict on_conflict) override;
 	void RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) override;
 
 private:
+	void ScanDirectory();
+
 	identifier_set_t persistent_secrets;
+	identifier_map_t<string> file_names;
 	string vault_path;
+	mutex rebind_lock;
+	//! 是否发生过写入(限制 secret_vault_directory 只能在空状态变更)
+	std::atomic<bool> has_written {false};
 };
 
 } // namespace duckdb

@@ -1,0 +1,91 @@
+# name: test/sql/storage-basics.test
+# description: 阶段二 —— local_encrypted 加密存储 CRUD/自动加载/脱敏/路由/status(TP-11..14 的 SQL 面)
+# group: [sql]
+# plan: plans/secret-vault-duckdb-extension-test-plan.md — TP-11..14
+# 运行前置(runner 负责):SECRET_VAULT_KEY 已设;SECRET_VAULT_PASSPHRASE=pp 已设;
+#   HOME 指向隔离目录;字节级 at-rest 断言由 scripts/verify-at-rest.py 单独执行(TP-10/14)。
+
+require secret_vault
+
+statement ok
+SET secret_vault_provider = 'env';
+
+statement ok
+CREATE PERSISTENT SECRET b1 IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'MARKER-BASIC-1');
+
+# 可见性:存储/持久化正确
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'b1' AND persistent AND storage = 'local_encrypted';
+----
+1
+
+# 脱敏:redact_keys 不因加密存储失效
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'b1' AND secret_string LIKE '%MARKER-BASIC-1%';
+----
+0
+
+# secret_string 形态完整(字段仍在,值为 redacted)
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'b1' AND secret_string LIKE '%password=redacted%';
+----
+1
+
+# status():存储名/目录/来源/文件数
+query TTI
+SELECT storage, provider, files FROM secret_vault_status();
+----
+local_encrypted
+env
+1
+
+# 覆盖写(OR REPLACE)
+statement ok
+CREATE OR REPLACE PERSISTENT SECRET b1 IN local_encrypted (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'MARKER-BASIC-2');
+
+query I
+SELECT files FROM secret_vault_status();
+----
+1
+
+# 第二个 secret + 默认存储路由
+statement ok
+SET default_secret_storage = 'local_encrypted';
+
+statement ok
+CREATE PERSISTENT SECRET b2 (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'p2');
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'b2' AND storage = 'local_encrypted';
+----
+1
+
+query I
+SELECT files FROM secret_vault_status();
+----
+2
+
+# 按 scope 查找走通(临时 secret 亦可用加密存储里的凭证做匹配基础)
+statement ok
+CREATE TEMP SECRET ts (TYPE vault_test, URL 'nats://x:4222', USER 'admin', PASSWORD 'x', SCOPE 'nats://scope-a');
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name IN ('b1', 'b2', 'ts');
+----
+3
+
+# DROP 删除文件
+statement ok
+DROP PERSISTENT SECRET b2;
+
+query I
+SELECT files FROM secret_vault_status();
+----
+1
+
+# 清理
+statement ok
+DROP PERSISTENT SECRET b1;
+
+statement ok
+DROP SECRET ts;
