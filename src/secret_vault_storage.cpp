@@ -266,8 +266,11 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 	data_ptr_t plain = plain_stream.GetData();
 	idx_t plain_len = plain_stream.GetPosition();
 
-	// 2. 加密(AAD 绑定 secret 名)
-	string name = secret.GetName();
+	// 2. 加密(AAD 绑定 secret 名)。
+	// GetName() 返回 Identifier;文件名 = GetName() + 后缀(spike 已证该拼接合法),
+	// 故以文件名反推基名,确保 AAD 与磁盘文件名严格一致(生成器同法)。
+	string file_name = secret.GetName() + VAULT_FILE_SUFFIX;
+	string name = file_name.substr(0, file_name.size() - string(VAULT_FILE_SUFFIX).size());
 	VaultBuf cipher {
 		nullptr, 0, 0};
 	int rc = vault_seal(VaultProviderId(), name.c_str(), plain, plain_len, &cipher);
