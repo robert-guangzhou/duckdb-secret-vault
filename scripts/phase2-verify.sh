@@ -109,10 +109,11 @@ echo "[L2] wrong passphrase above: expect AEAD tag mismatch"
 echo "== M. TP-24b 修正:keyring provider 在无 dbus 容器经扩展 CREATE(加密路径)→ 明确报错 =="
 export HOME=/tmp/vault-home-m
 rm -rf "$HOME"; mkdir -p "$HOME"
-($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='keyring'; CREATE PERSISTENT SECRET kr IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'M');" 2>&1 | tail -1 | tee /tmp/m.err) || true
+($D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='keyring'; CREATE PERSISTENT SECRET kr IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'M');" 2>&1 | tail -2 | tee /tmp/m.err) || true
 grep -qi "keyring" /tmp/m.err && echo "[M] keyring-unavailable error surfaced via encrypt path: PASS" || echo "[M] FAIL: no keyring error"
 
-echo "== J. 清理 =="
+echo "== J. 清理(回到主 HOME) =="
+export HOME=/tmp/vault-home-p2
 $D -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; SET secret_vault_provider='env'; DROP PERSISTENT SECRET tp10;" || true
 rm -f "$VAULT_DIR"/*.duckdb_secret.vault
 ls "$VAULT_DIR" 2>/dev/null; echo "(empty expected)"
