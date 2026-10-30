@@ -158,7 +158,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::VARCHAR, Value("keyring"), SecretVaultProviderSetting, SetScope::SESSION);
 	config.AddExtensionOption("secret_vault_directory",
 	                          "Directory for local_encrypted secret files (changeable only while storage is empty)",
-	                          LogicalType::VARCHAR, Value(), SecretVaultDirectorySetting, SetScope::SESSION);
+	                          LogicalType::VARCHAR, Value(VaultSecretStorage::DefaultVaultPath(db)),
+	                          SecretVaultDirectorySetting, SetScope::SESSION);
 
 	// secret_vault_status()
 	TableFunction status_fn("secret_vault_status", {}, VaultStatusExecute, VaultStatusData::Create,

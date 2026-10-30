@@ -22,6 +22,21 @@ namespace duckdb {
 const string LOCAL_ENCRYPTED_STORAGE_NAME = "local_encrypted";
 
 //===--------------------------------------------------------------------===//
+// VaultBuf RAII 守卫(全面 review CR-H1/H2 修复)
+// 析构 = zeroize + 按契约释放:正常与异常(含反序列化抛出、写盘 IO 失败)路径
+// 均不泄漏、明文不留残留。
+//===--------------------------------------------------------------------===//
+namespace {
+struct VaultBufGuard {
+	VaultBuf buf {nullptr, 0, 0};
+	~VaultBufGuard() {
+		vault_zeroize_buf(buf.ptr, buf.len);
+		vault_free_buf(buf);
+	}
+};
+} // namespace
+
+//===--------------------------------------------------------------------===//
 // 全局配置
 //===--------------------------------------------------------------------===//
 
@@ -115,10 +130,10 @@ unique_ptr<CatalogEntry> VaultSecretGenerator::CreateDefaultEntryInternal(const 
 		                  error.RawMessage());
 	}
 
-	// 解密:错密钥/错名/篡改统一 AEAD 失败(直接抛出,不重复包装)
-	VaultBuf plain {
-		nullptr, 0, 0};
-	int rc = vault_open(VaultProviderId(), orig_name.c_str(), cipher.get(), file_size, &plain);
+	// 解密:错密钥/错名/篡改统一 AEAD 失败(直接抛出,不重复包装)。
+	// plain 由守卫持有:反序列化抛出时同样 zeroize+free(CR-H1 修复)
+	VaultBufGuard plain;
+	int rc = vault_open(VaultProviderId(), orig_name.c_str(), cipher.get(), file_size, &plain.buf);
 	if (rc != 0) {
 		throw SerializationException("secret_vault: decrypt failed for secret '%s' (provider %s): %s", orig_name,
 		                              VaultProviderName(VaultProviderId()), VaultLastError());
@@ -126,7 +141,7 @@ unique_ptr<CatalogEntry> VaultSecretGenerator::CreateDefaultEntryInternal(const 
 
 	unique_ptr<BaseSecret> deserialized_secret;
 	try {
-		MemoryStream plain_stream(plain.ptr, plain.len);
+		MemoryStream plain_stream(plain.buf.ptr, plain.buf.len);
 		BinaryDeserializer deserializer(plain_stream);
 		deserializer.Begin();
 		deserialized_secret = secret_manager.DeserializeSecret(deserializer, secret_path);
@@ -137,10 +152,7 @@ unique_ptr<CatalogEntry> VaultSecretGenerator::CreateDefaultEntryInternal(const 
 		                             "please remove the file, restart and try again. (error message: '%s')",
 		                             secret_path, error.RawMessage());
 	}
-
-	// 卫生:明文缓冲用后清零,再按契约释放
-	vault_zeroize_buf(plain.ptr, plain.len);
-	vault_free_buf(plain);
+	// plain 由守卫在作用域结束时 zeroize+free
 
 	auto entry = make_uniq<SecretCatalogEntry>(std::move(deserialized_secret), catalog);
 	entry->secret->storage_mode = LOCAL_ENCRYPTED_STORAGE_NAME;
@@ -272,17 +284,17 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 	data_ptr_t plain = plain_stream.GetData();
 	idx_t plain_len = plain_stream.GetPosition();
 
-	// 2. 加密(AAD 绑定 secret 名)。
-	// GetName() 返回 Identifier;文件名 = GetName() + 后缀(spike 已证该拼接合法),
-	// 故以文件名反推基名,确保 AAD 与磁盘文件名严格一致(生成器同法)。
+	// 2. 加密(AAD 绑定 secret 名)。cipher 由守卫持有:写盘 IO 失败同样释放(CR-H2 修复)
 	string file_name = secret.GetName() + VAULT_FILE_SUFFIX;
 	string name = file_name.substr(0, file_name.size() - string(VAULT_FILE_SUFFIX).size());
-	VaultBuf cipher {
-		nullptr, 0, 0};
-	int rc = vault_seal(VaultProviderId(), name.c_str(), plain, plain_len, &cipher);
+	VaultBufGuard cipher;
+	int rc = vault_seal(VaultProviderId(), name.c_str(), plain, plain_len, &cipher.buf);
 
-	// 卫生:序列化明文缓冲立即清零(加密失败也清)
-	vault_zeroize_buf(plain, plain_len);
+	// 卫生:序列化明文缓冲立即清零(加密失败也清)。
+	// 清整个 capacity:MemoryStream 自增长会使 capacity > position,
+	// 有效长度外的空隙同样可能残留明文尾片(CR-H3 缓解)。
+	// 已知残余(设计债):增长过程中被释放的中间缓冲未清零,彻底方案需清零型 WriteStream。
+	vault_zeroize_buf(plain, plain_stream.GetCapacity());
 
 	if (rc != 0) {
 		throw InvalidInputException("secret_vault: encrypt failed for secret '%s' (provider %s): %s", name,
@@ -302,14 +314,14 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 		open_flags |= FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
 
 		auto file_writer = BufferedFileWriter(fs, temp_path, open_flags);
-		file_writer.WriteData(const_data_ptr_t(cipher.ptr), cipher.len);
+		file_writer.WriteData(const_data_ptr_t(cipher.buf.ptr), cipher.buf.len);
 		file_writer.Flush();
 	}
 
-	vault_free_buf(cipher);
 	fs.MoveFile(temp_path, file_path);
 	// 写入成功后才锁定目录变更(诚实审查 LOW-3:失败不锁定)
 	has_written = true;
+	// cipher 由守卫在作用域结束时释放
 }
 
 void VaultSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) {

@@ -6,6 +6,9 @@
 
 #include "secret_vault_rust.h" // PROVIDER_* / VaultBuf / vault_* C ABI
 
+#include <atomic>
+#include <mutex>
+
 namespace duckdb {
 
 //! 对外存储名:CREATE PERSISTENT SECRET ... IN local_encrypted / duckdb_secrets().storage

@@ -19,6 +19,10 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > - 环境变量 `SECRET_VAULT_DIRECTORY` 可在 LOAD 前指定存储目录(默认
 >   `~/.duckdb/stored_secrets_vault`);运行期变更用 `SET secret_vault_directory`
 >   (仅空存储状态允许)。
+> - 环境变量(`SECRET_VAULT_KEY/PASSPHRASE`)应在进程启动前设置;
+>   运行中并发修改 env 与查询属未定义行为(Rust env 非线程安全)。
+> - 崩溃/异常可能残留 `<name>.duckdb_secret.vault.tmp-<uuid>` 临时文件:
+>   它们不被加载,可安全手动删除(`rm *.tmp-*`)。
 >
 > 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r7)
 

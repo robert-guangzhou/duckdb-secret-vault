@@ -1,0 +1,15 @@
+services:
+  builder:
+    build:
+      context: ./docker
+      dockerfile: dev.Dockerfile
+    image: secret-vault-builder:latest
+    volumes:
+      - .:/workspace
+      - sv-cargo-registry:/usr/local/cargo/registry
+      - sv-cargo-git:/usr/local/cargo/git
+    command: sleep infinity
+
+volumes:
+  sv-cargo-registry:
+  sv-cargo-git:
