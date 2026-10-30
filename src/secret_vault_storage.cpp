@@ -24,17 +24,23 @@ const string LOCAL_ENCRYPTED_STORAGE_NAME = "local_encrypted";
 //===--------------------------------------------------------------------===//
 // VaultBuf RAII 守卫(全面 review CR-H1/H2 修复)
 // 析构 = zeroize + 按契约释放:正常与异常(含反序列化抛出、写盘 IO 失败)路径
-// 均不泄漏、明文不留残留。
+// 均不泄漏、明文不留残留。storage 与 functions 两个翻译单元共用。
 //===--------------------------------------------------------------------===//
-namespace {
-struct VaultBufGuard {
-	VaultBuf buf {nullptr, 0, 0};
-	~VaultBufGuard() {
-		vault_zeroize_buf(buf.ptr, buf.len);
-		vault_free_buf(buf);
-	}
-};
-} // namespace
+
+VaultBufGuard::~VaultBufGuard() {
+	vault_zeroize_buf(buf.ptr, buf.len);
+	vault_free_buf(buf);
+}
+
+static VaultSecretStorage *g_vault_storage = nullptr;
+
+VaultSecretStorage *GetVaultStorage() {
+	return g_vault_storage;
+}
+
+void SetVaultStorage(VaultSecretStorage *storage) {
+	g_vault_storage = storage;
+}
 
 //===--------------------------------------------------------------------===//
 // 全局配置

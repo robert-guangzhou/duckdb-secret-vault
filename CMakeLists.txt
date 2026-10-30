@@ -75,7 +75,7 @@ corrosion_import_crate(
   FLAGS
   --crate-type=staticlib)
 
-set(EXTENSION_SOURCES src/secret_vault_extension.cpp src/secret_vault_storage.cpp)
+set(EXTENSION_SOURCES src/secret_vault_extension.cpp src/secret_vault_storage.cpp src/secret_vault_functions.cpp)
 
 # FFI 头文件滞后检测（沿用 nats_rw 根治方案）：lib.rs 或 cbindgen.toml 比
 # secret_vault_rust.h 新 → 编译前 FATAL_ERROR

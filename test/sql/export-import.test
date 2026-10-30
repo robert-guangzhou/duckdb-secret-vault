@@ -1,0 +1,72 @@
+# name: test/sql/export-import.test
+# description: 阶段三 —— 一次性封套 export/import(参数码路径;stdin 路径与跨实例由 scripts/phase3-verify.sh E/F 段覆盖)
+# group: [sql]
+# plan: plans/secret-vault-duckdb-extension-test-plan.md — TP-34/35(SQL 面)
+# 运行前置(runner):SECRET_VAULT_KEY 已设;HOME 隔离;/tmp/p3exp.svb 可写。
+# 确定性码 = base32([0x42]*32)。
+
+require secret_vault
+
+statement ok
+SET secret_vault_provider = 'env';
+
+statement ok
+CREATE PERSISTENT SECRET e1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'EXPORT-MARK-1');
+
+statement ok
+CREATE PERSISTENT SECRET e2 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'EXPORT-MARK-2');
+
+# 导出(指定码,自动化确定性):返回 文件/码/条数
+query TI
+SELECT secrets, transport_code FROM secret_vault_export('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA');
+----
+2
+IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA
+
+# 错码导入 → AEAD 失败
+statement error
+SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+----
+AEAD tag mismatch
+
+# 非法码格式 → base32 校验报错
+statement error
+SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'not-base32-!!!');
+----
+invalid transport code
+
+# 正码但同名冲突,默认 on_conflict=error
+statement error
+SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA');
+----
+already exists
+
+# overwrite:导入 2 条(当前 provider 重加密)
+query II
+SELECT imported, skipped FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'overwrite');
+----
+2	0
+
+# skip:全部跳过
+query II
+SELECT imported, skipped FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'skip');
+----
+0	2
+
+# 非法 on_conflict 值
+statement error
+SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'replace');
+----
+on_conflict must be
+
+# 读取仍正常且脱敏
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name IN ('e1','e2') AND secret_string LIKE '%EXPORT-MARK%';
+----
+0
+
+statement ok
+DROP PERSISTENT SECRET e1;
+
+statement ok
+DROP PERSISTENT SECRET e2;

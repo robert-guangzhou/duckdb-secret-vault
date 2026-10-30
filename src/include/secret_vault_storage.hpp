@@ -33,6 +33,17 @@ bool TryParseProviderName(const string &name, uint8_t &out);
 //! 拷贝 Rust 侧最近一次错误(线程本地,须立即拷贝——见 secret_vault_rust.h 契约)
 string VaultLastError();
 
+//! VaultBuf RAII 守卫(全面 review CR-H1/H2 修复):析构 = zeroize + 按契约释放,
+//! 正常与异常路径均不泄漏、明文不留残留。storage/functions 共用。
+struct VaultBufGuard {
+	VaultBuf buf {nullptr, 0, 0};
+	~VaultBufGuard();
+};
+
+//! 全局存储实例(单 DB 假设,README 语义节;settings/status/函数层经此触达)
+VaultSecretStorage *GetVaultStorage();
+void SetVaultStorage(VaultSecretStorage *storage);
+
 //===--------------------------------------------------------------------===//
 // 存储与懒加载生成器
 //===--------------------------------------------------------------------===//

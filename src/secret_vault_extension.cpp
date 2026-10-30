@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "secret_vault_extension.hpp"
+#include "secret_vault_functions.hpp"
 #include "secret_vault_rust.h" // cbindgen 生成；变更后运行 rust/regen-header.sh
 #include "secret_vault_storage.hpp"
 
@@ -64,10 +65,7 @@ static void RegisterVaultTestSecretType(ExtensionLoader &loader) {
 	loader.RegisterFunction(function);
 }
 
-// ---- 全局存储实例指针（单 DB 假设；供 settings 回调触达）----
-static VaultSecretStorage *g_storage = nullptr;
-
-// ---- settings ----
+// ---- 全局存储实例指针(单 DB 假设;供 settings 回调与函数层触达)----
 
 static void SecretVaultProviderSetting(ClientContext &context, SetScope scope, Value &parameter) {
 	uint8_t id;
@@ -81,10 +79,11 @@ static void SecretVaultProviderSetting(ClientContext &context, SetScope scope, V
 }
 
 static void SecretVaultDirectorySetting(ClientContext &context, SetScope scope, Value &parameter) {
-	if (!g_storage) {
+	auto *storage = GetVaultStorage();
+	if (!storage) {
 		throw InvalidInputException("secret_vault: storage not initialized");
 	}
-	g_storage->RebindDirectory(parameter.ToString());
+	storage->RebindDirectory(parameter.ToString());
 	parameter = Value("ok");
 }
 
@@ -121,6 +120,7 @@ static void VaultStatusExecute(ClientContext &context, TableFunctionInput &data,
 	}
 	global.done = true;
 	output.SetCardinality(1);
+	auto *g_storage = GetVaultStorage();
 	if (g_storage) {
 		output.SetValue(0, 0, Value(LOCAL_ENCRYPTED_STORAGE_NAME));
 		output.SetValue(1, 0, Value(g_storage->PublicDirectory()));
@@ -140,6 +140,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(version_function);
 
 	RegisterVaultTestSecretType(loader);
+	RegisterVaultFunctions(loader);
 
 	auto &db = loader.GetDatabaseInstance();
 	auto &secret_manager = *DBConfig::GetConfig(db).secret_manager;
@@ -149,7 +150,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	const char *dir_env = std::getenv("SECRET_VAULT_DIRECTORY");
 	string vault_path = dir_env ? string(dir_env) : VaultSecretStorage::DefaultVaultPath(db);
 	auto storage = make_uniq<VaultSecretStorage>(secret_manager, db, LOCAL_ENCRYPTED_STORAGE_NAME, vault_path);
-	g_storage = storage.get();
+	SetVaultStorage(storage.get());
 	secret_manager.LoadSecretStorage(std::move(storage));
 
 	// settings(经 DBConfig::AddExtensionOption;SET/RESET/duckdb_settings 可见)

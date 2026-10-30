@@ -1,0 +1,56 @@
+# name: test/sql/migrate-rotate.test
+# description: 阶段三 —— rotate 重加密(env↔passphrase);migrate 的跨存储流程由 scripts/phase3-verify.sh B 段覆盖(文件级迁移+新连接生效,含 delete_source)
+# group: [sql]
+# plan: plans/secret-vault-duckdb-extension-test-plan.md — TP-33
+# 运行前置(runner):SECRET_VAULT_KEY 已设;HOME 隔离。
+
+require secret_vault
+
+statement ok
+SET secret_vault_provider = 'env';
+
+statement ok
+CREATE PERSISTENT SECRET r1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'ROTATE-MARK');
+
+query I
+SELECT files FROM secret_vault_status();
+----
+1
+
+# rotate:env → passphrase(新口令经参数注入进程 env,供 Rust 侧派生)
+query I
+SELECT rotated FROM secret_vault_rotate(new_provider := 'passphrase', new_passphrase := 'round-trip-pass-2');
+----
+1
+
+# 同进程 provider 已切换,r1 仍可读且脱敏(catalog 条目 + 新密钥文件)
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'r1' AND secret_string LIKE '%password=redacted%';
+----
+1
+
+# rotate 回 env(runner 注入的 KEY 仍在)验证对称性
+query I
+SELECT rotated FROM secret_vault_rotate(new_provider := 'env');
+----
+1
+
+query I
+SELECT provider FROM secret_vault_status();
+----
+env
+
+# 非法 new_provider → 明确报错
+statement error
+SELECT * FROM secret_vault_rotate(new_provider := 'kms');
+----
+new_provider must be
+
+# 缺 new_provider → 报错
+statement error
+SELECT * FROM secret_vault_rotate();
+----
+new_provider is required
+
+statement ok
+DROP PERSISTENT SECRET r1;
