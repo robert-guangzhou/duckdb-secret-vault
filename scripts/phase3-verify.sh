@@ -42,7 +42,7 @@ echo "[B4] 源文件默认保留:"; ls "$HOME/.duckdb/stored_secrets/" | wc -l
 N=$(SQLL "SET secret_vault_provider='env'; SELECT count(*) FROM duckdb_secrets() WHERE storage='local_encrypted' AND secret_string LIKE '%password=redacted%';")
 echo "[B5] 新进程读迁移件(脱敏) = $N (expect 2)"
 # delete_source 变体
-SQLL "SET secret_vault_provider='env'; CREATE PERSISTENT SECRET m3 (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-3') IN local_encrypted;" >/dev/null
+SQLL "SET secret_vault_provider='env'; CREATE PERSISTENT SECRET m3 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-3');" >/dev/null
 SQLL "CREATE PERSISTENT SECRET m3lf (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'MIG-3LF');" >/dev/null
 SQLL "SET secret_vault_provider='env'; SELECT migrated FROM secret_vault_migrate(delete_source := true);" >/dev/null
 echo "[B6] delete_source 后源目录:"; ls "$HOME/.duckdb/stored_secrets/" | wc -l
@@ -61,7 +61,7 @@ unset SECRET_VAULT_PASSPHRASE
 
 echo "== D. nats_rw 真实联调(TP-30/31:类型无关 + scope 自动匹配) =="
 new_home /tmp/vh-p3-d
-SQLL "SET secret_vault_provider='env'; CREATE PERSISTENT SECRET np IN local_encrypted (TYPE nats_rw, URL '$NATS_URL', USER 'admin', PASSWORD 's3cret-pass', SCOPE 'nats://nats_userpass');" >/dev/null
+$DUCKDB -unsigned -noheader -list -c "LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env'; CREATE PERSISTENT SECRET np IN local_encrypted (TYPE nats_rw, URL '$NATS_URL', USER 'admin', PASSWORD 's3cret-pass', SCOPE 'nats://nats_userpass');" >/dev/null
 echo "[D1] nats_rw secret 落盘密文断言:"
 python3 $WS/scripts/verify-at-rest.py "$HOME/.duckdb/stored_secrets_vault" np 's3cret-pass' | tail -1
 LD2="LOAD '$WS/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension'; LOAD '$NATS_EXT'; SET secret_vault_provider='env';"

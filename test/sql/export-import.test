@@ -25,7 +25,7 @@ IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA
 
 # 错码导入 → AEAD 失败
 statement error
-SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA');
 ----
 AEAD tag mismatch
 
@@ -49,13 +49,13 @@ SELECT imported, skipped FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJB
 
 # skip:全部跳过
 query II
-SELECT imported, skipped FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'skip');
+SELECT imported, skipped FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'skip');
 ----
 0	2
 
 # 非法 on_conflict 值
 statement error
-SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'replace');
+SELECT * FROM secret_vault_import('/tmp/p3exp.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'replace');
 ----
 on_conflict must be
 
