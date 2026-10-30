@@ -57,7 +57,9 @@ SRC_FILE="$HOME/.duckdb/stored_secrets/d1.duckdb_secret"
 export HOME=/tmp/vh-p3-b2
 cp "$SRC_FILE" "$HOME/.duckdb/stored_secrets/d1.duckdb_secret"
 chmod 600 "$HOME/.duckdb/stored_secrets/d1.duckdb_secret"
-(SQLL "SET secret_vault_provider='env'; SELECT migrated FROM secret_vault_migrate();" 2>&1 | grep -m1 "already exists") && echo "[B7a] conflict default=error: PASS"
+B7A_OUT=$(SQLL "SET secret_vault_provider='env'; SELECT migrated FROM secret_vault_migrate();" 2>&1 || true)
+echo "$B7A_OUT" | head -1
+if echo "$B7A_OUT" | grep -q "already exists"; then echo "[B7a] conflict default=error: PASS"; else echo "[B7a] FAIL"; fi
 R=$(SQLL "SET secret_vault_provider='env'; SELECT migrated || '|' || skipped FROM secret_vault_migrate(on_conflict := 'skip');")
 echo "[B7b] skip: migrated|skipped = $R (expect 0|1)"
 
@@ -105,6 +107,11 @@ mode = stat.S_IMODE(os.stat("/tmp/p3bundle.svb").st_mode)
 print("[E2d] envelope mode:", oct(mode), "(expect 0o600)")
 assert mode == 0o600, "envelope must be private (P3-H2)"
 PY
+echo "[E2e] export 拒绝非信封既有文件(HC2-H1):"
+echo "IMPORTANT-DATA" > /tmp/notenv.svb
+(SQLL "SET secret_vault_provider='env'; SELECT secrets FROM secret_vault_export('/tmp/notenv.svb');" 2>&1 | grep -m1 "refusing to overwrite") || true
+grep -q "IMPORTANT-DATA" /tmp/notenv.svb && echo "[E2e] file intact: PASS" || echo "[E2e] FAIL: file damaged"
+rm -f /tmp/notenv.svb
 # 实例 B:passphrase 体系(无 SECRET_VAULT_KEY)
 new_home /tmp/vh-p3-eb
 export SECRET_VAULT_PASSPHRASE=import-side-pass

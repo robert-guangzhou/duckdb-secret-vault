@@ -286,17 +286,37 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 	// P3-M1:保留旧 env 值,写阶段失败时恢复——否则旧钥文件将无法解密
 	// (半失败恢复步骤见 README:重设旧口令 → 重新 rotate)
 	uint8_t old_provider = VaultProviderId();
+	// HC2-M1:记录旧值是否"原本存在"——不存在者恢复时必须 unsetenv,
+	// 否则恢复成空串会让 passphrase 派生退化为"空口令→AEAD 失败"的误导形态
 	const char *old_pass_env = std::getenv("SECRET_VAULT_PASSPHRASE");
-	string old_pass = old_pass_env ? string(old_pass_env) : string();
+	bool had_pass = old_pass_env != nullptr;
+	string old_pass = had_pass ? string(old_pass_env) : string();
 	const char *old_key_env = std::getenv("SECRET_VAULT_KEY");
-	string old_key = old_key_env ? string(old_key_env) : string();
+	bool had_key = old_key_env != nullptr;
+	string old_key = had_key ? string(old_key_env) : string();
 	auto restore_env = [&]() {
 #ifdef _WIN32
-		_putenv_s("SECRET_VAULT_PASSPHRASE", old_pass.c_str());
-		_putenv_s("SECRET_VAULT_KEY", old_key.c_str());
+		if (had_pass) {
+			_putenv_s("SECRET_VAULT_PASSPHRASE", old_pass.c_str());
+		} else {
+			_putenv_s("SECRET_VAULT_PASSPHRASE", "");
+		}
+		if (had_key) {
+			_putenv_s("SECRET_VAULT_KEY", old_key.c_str());
+		} else {
+			_putenv_s("SECRET_VAULT_KEY", "");
+		}
 #else
-		setenv("SECRET_VAULT_PASSPHRASE", old_pass.c_str(), 1);
-		setenv("SECRET_VAULT_KEY", old_key.c_str(), 1);
+		if (had_pass) {
+			setenv("SECRET_VAULT_PASSPHRASE", old_pass.c_str(), 1);
+		} else {
+			unsetenv("SECRET_VAULT_PASSPHRASE");
+		}
+		if (had_key) {
+			setenv("SECRET_VAULT_KEY", old_key.c_str(), 1);
+		} else {
+			unsetenv("SECRET_VAULT_KEY");
+		}
 #endif
 	};
 	if (bind.have_passphrase) {
@@ -328,10 +348,13 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 	} catch (std::exception &) {
 		SetVaultProviderGlobal(old_provider);
 		restore_env();
-		// 卫生:失败路径剩余明文也清零(P3-M3)
+		// 卫生:失败路径剩余明文与新密钥材料也清零(P3-M3/HC2-M2)
 		for (auto &pt : plaintexts) {
 			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
 		}
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.new_passphrase.data())),
+		                  bind.new_passphrase.size());
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.new_key.data())), bind.new_key.size());
 		throw;
 	}
 	// 卫生:rotate 参数中的新口令/新密钥用后清零(不入残余内存)
@@ -414,8 +437,27 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 	}
 	{
 		// P3-H2:信封承载全部 secret 明文(仅一次性码保护),权限不得弱于单文件密文。
-		// 幂等:先移除旧 bundle 再写(导出即重生成,避免 CREATE_NEW 撞残留文件)
-		fs.TryRemoveFile(bind.file);
+		// 幂等仅对"安全可覆盖"目标放行:不存在 / 空文件 / 有效信封(magic 前 8 字节,
+		// 对齐 Rust 侧 ENV_MAGIC=b"DSVLTENV"——若格式演进须同步此常量)。
+		// HC2-H1:其余既有文件一律拒绝,杜绝误删任意路径内容。
+		if (fs.FileExists(bind.file)) {
+			char head[8] = {0};
+			idx_t got = 0;
+			auto reader = BufferedFileReader(fs, bind.file.c_str());
+			got = MinValue<idx_t>(reader.FileSize(), 8);
+			if (got > 0) {
+				reader.ReadData(reinterpret_cast<data_ptr_t>(head), got);
+			}
+			bool empty = (got == 0);
+			bool is_envelope = (got == 8 && std::memcmp(head, "DSVLTENV", 8) == 0);
+			if (!empty && !is_envelope) {
+				throw InvalidInputException(
+				    "secret_vault_export: refusing to overwrite '%s': existing file is not a vault envelope (empty "
+				    "file or DSVLTENV magic required)",
+				    bind.file);
+			}
+			fs.TryRemoveFile(bind.file);
+		}
 		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_PRIVATE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
 		auto writer = BufferedFileWriter(fs, bind.file, flags);
 		writer.WriteData(envelope.buf.ptr, envelope.buf.len);
@@ -518,21 +560,31 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 
 	auto dir = storage->PublicDirectory();
 	idx_t imported = 0, skipped = 0;
-	for (auto &e : entries) {
-		string target = fs.JoinPath(dir, e.name + VAULT_FILE_SUFFIX);
-		bool exists = fs.FileExists(target);
-		if (exists && bind.on_conflict == "skip") {
-			skipped++;
-			continue;
+	try {
+		for (auto &e : entries) {
+			string target = fs.JoinPath(dir, e.name + VAULT_FILE_SUFFIX);
+			bool exists = fs.FileExists(target);
+			if (exists && bind.on_conflict == "skip") {
+				skipped++;
+				vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
+				continue;
+			}
+			if (exists && bind.on_conflict == "error") {
+				throw InvalidInputException(
+				    "secret_vault_import: secret '%s' already exists in '%s' (use on_conflict := 'overwrite' or "
+				    "'skip')",
+				    e.name, dir);
+			}
+			VaultWriteEncryptedFile(fs, dir, e.name, e.plaintext.data(), e.plaintext.size());
+			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
+			imported++;
 		}
-		if (exists && bind.on_conflict == "error") {
-			throw InvalidInputException(
-			    "secret_vault_import: secret '%s' already exists in '%s' (use on_conflict := 'overwrite' or 'skip')",
-			    e.name, dir);
+	} catch (std::exception &) {
+		// 卫生:异常路径清零全部条目明文(HC2-M2;已清条目重复清零无害)
+		for (auto &e : entries) {
+			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
 		}
-		VaultWriteEncryptedFile(fs, dir, e.name, e.plaintext.data(), e.plaintext.size());
-		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
-		imported++;
+		throw;
 	}
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value::UBIGINT(imported));
