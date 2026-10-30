@@ -370,10 +370,10 @@ pub extern "C" fn secret_vault_core_version() -> *const c_char {
 }
 
 // ==== 一次性传输封套(plan 3.5:export/import) ====
-//! 封套与 per-secret 文件格式完全独立:transport key(一次性 256-bit)经
-//! HKDF-SHA256 域分隔派生封套密钥,加密「已解密的 secret 序列化明文」整包。
-//! 导入方解开封套后用本机 provider 重新 seal 落盘——transport key 与任何
-//! 实例运行时密钥解耦。
+// 封套与 per-secret 文件格式完全独立:transport key(一次性 256-bit)经
+// HKDF-SHA256 域分隔派生封套密钥,加密「已解密的 secret 序列化明文」整包。
+// 导入方解开封套后用本机 provider 重新 seal 落盘——transport key 与任何
+// 实例运行时密钥解耦。
 
 pub const ENV_MAGIC: &[u8; 8] = b"DSVLTENV";
 pub const ENV_FORMAT_VERSION: u16 = 1;
