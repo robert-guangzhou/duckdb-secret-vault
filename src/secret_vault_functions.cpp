@@ -103,7 +103,7 @@ static uint32_t ReadU32(const char *&p, const char *end) {
 struct EnvelopeEntry {
 	string name;
 	string plaintext;
-	int64_t mtime = 0; // v1.1:源文件 mtime(Unix 秒),重放判定用
+	int64_t mtime = 0; // v1.1:源文件 mtime(DuckDB timestamp_t,Unix µs),重放判定用
 };
 
 // CR-H3:payload 含明文,先按精确总长 reserve 再拼,杜绝 std::string 扩容
@@ -448,7 +448,7 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 		e.plaintext = VaultReadDecryptedFile(fs, path, n);
 		{
 			auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-			e.mtime = static_cast<int64_t>(fs.GetLastModifiedTime(*handle).value); // timestamp_t(Unix 秒)
+			e.mtime = static_cast<int64_t>(fs.GetLastModifiedTime(*handle).value); // timestamp_t.value = Unix µs
 		}
 		entries.push_back(std::move(e));
 	}

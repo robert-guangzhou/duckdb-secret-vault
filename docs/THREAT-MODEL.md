@@ -43,9 +43,14 @@
 
 ## 已知残余(诚实声明)
 
+- **keyring 主密钥常驻进程内存**(r13 起 OnceLock 缓存,CR-H4 修复引入):旧实现每次
+  派生从 keychain 读入 Zeroizing 用后清零;新实现首次读取后缓存在进程静态存储中
+  **全生命周期不清零**。威胁模型下可辩护(同用户攻击者 out-of-scope,keychain 本身
+  也是持久存储),但密钥驻留窗口从"使用瞬间"扩大到"进程存活期"——外部轮换
+  keyring 主密钥后需重启进程才生效。
+
 - 序列化 MemoryStream 扩容过程中的**中间缓冲**未清零(有效长度与 capacity 已清);
-  彻底方案为清零型 WriteStream,登记于 Dev Plan CR 表(v1.1 已实现 ZeroizingWriteStream
-  后更新状态)。
+  v1.1 已实现 ZeroizingMemoryStream 后解决。
 - 错误路径资源清零由 RAII 守卫保证,ASan 级泄漏量化未做(minis 上有 ASan 风暴前科,
   以 RSS 启发式循环替代,结论按启发式标注)。
 - `secret_vault_rotate` 写阶段中途失败会留下新旧密钥混合文件(进程自动恢复旧
