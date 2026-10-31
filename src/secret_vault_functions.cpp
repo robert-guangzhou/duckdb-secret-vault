@@ -77,10 +77,6 @@ static void AppendU64(string &buf, uint64_t v) {
 		buf.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
 	}
 }
-	for (int i = 3; i >= 0; i--) {
-		buf.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
-	}
-}
 
 static uint64_t ReadU64(const char *&p, const char *end) {
 	if (p + 8 > end) {
