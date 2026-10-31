@@ -8,6 +8,18 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > (`secret_vault_migrate/rotate/export/import/status`)+ 一次性封套跨实例转移
 > (stdin 输码)+ nats_rw 真实联调验证。阶段四(威胁模型文档/社区提交)待做。
 >
+> ## 密钥生成指南(部署前必读)
+>
+> - **env provider**(调度/CI):`export SECRET_VAULT_KEY="$(openssl rand -base64 32)"`
+>   ——由调度器凭据存储注入,**禁止**写进脚本/任务定义明文;同用户进程可读
+>   `/proc/<pid>/environ` 属已声明边界(见 THREAT-MODEL)。
+> - **keyring provider**(工作站默认):无需生成——首次使用自动在 OS 凭据库生成
+>   256-bit 主密钥;轮换主密钥 = 清除凭据条目 `duckdb.secret_vault/master` 后
+>   `secret_vault_rotate`(注意:长驻进程缓存主密钥,轮换后需重启进程)。
+> - **passphrase provider**:口令需 ≥4 个随机词或 ≥16 字符随机串;弱口令可被
+>   离线暴力猜测(Argon2id 抬高单次成本但不替代熵);**遗忘即数据不可恢复**。
+> - 传输封套的一次性码:导出结果行显示一次,经密码管理器/口头传递;再导出即作废旧包。
+>
 > ## 常用操作
 >
 > ```sql

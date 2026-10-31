@@ -78,36 +78,45 @@ pub type VaultResult<T> = Result<T, VaultError>;
 
 // ==== KeyProvider ====
 
+fn load_or_create_keyring_master() -> VaultResult<[u8; KEY_LEN]> {
+    let entry = keyring::Entry::new("duckdb.secret_vault", "master")
+        .map_err(|e| VaultError::KeyUnavailable(format!("keyring: {e}")))?;
+    let master = match entry.get_secret() {
+        Ok(m) => m,
+        Err(keyring::Error::NoEntry) => {
+            // 首次使用:生成并持久化主密钥
+            let mut mk = Zeroizing::new([0u8; KEY_LEN]);
+            OsRng.fill_bytes(&mut *mk);
+            entry
+                .set_secret(&*mk)
+                .map_err(|e| VaultError::KeyUnavailable(format!("keyring set: {e}")))?;
+            mk.to_vec()
+        }
+        Err(e) => return Err(VaultError::KeyUnavailable(format!("keyring: {e}"))),
+    };
+    if master.len() != KEY_LEN {
+        return Err(VaultError::KeyUnavailable(format!(
+            "keyring master key must be {KEY_LEN} bytes, found {}",
+            master.len()
+        )));
+    }
+    let mut key = [0u8; KEY_LEN];
+    key.copy_from_slice(&master);
+    Ok(key)
+}
+
 fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8; KEY_LEN]>> {
     match provider {
         PROVIDER_KEYRING => {
             // OS keychain 主密钥(salt 置零,主密钥直接作 AEAD key)。
             // 首次使用自动生成随机 256-bit 主密钥并写入 keychain(Dev Plan 3.3);
             // 无 Secret Service(如 headless Linux)时明确报错,不静默降级(Dev Plan 六)。
-            let entry = keyring::Entry::new("duckdb.secret_vault", "master")
-                .map_err(|e| VaultError::KeyUnavailable(format!("keyring: {e}")))?;
-            let master = match entry.get_secret() {
-                Ok(m) => m,
-                Err(keyring::Error::NoEntry) => {
-                    // 首次使用:生成并持久化主密钥
-                    let mut mk = Zeroizing::new([0u8; KEY_LEN]);
-                    OsRng.fill_bytes(&mut *mk);
-                    entry
-                        .set_secret(&*mk)
-                        .map_err(|e| VaultError::KeyUnavailable(format!("keyring set: {e}")))?;
-                    mk.to_vec()
-                }
-                Err(e) => return Err(VaultError::KeyUnavailable(format!("keyring: {e}"))),
-            };
-            if master.len() != KEY_LEN {
-                return Err(VaultError::KeyUnavailable(format!(
-                    "keyring master key must be {KEY_LEN} bytes, found {}",
-                    master.len()
-                )));
-            }
-            let mut key = Zeroizing::new([0u8; KEY_LEN]);
-            key.copy_from_slice(&master);
-            Ok(key)
+            // CR-H4(r13):每进程仅读取一次 keychain(OnceLock 缓存,对齐 Dev Plan 七);
+            // 代价 = keyring 主密钥外部轮换后需重启进程(README/THREAT-MODEL 已声明)。
+            static MASTER: std::sync::OnceLock<Result<[u8; KEY_LEN], String>> = std::sync::OnceLock::new();
+            let cached = MASTER.get_or_init(|| load_or_create_keyring_master().map_err(|e| e.to_string()));
+            let key_arr = cached.as_ref().map_err(|msg| VaultError::KeyUnavailable(msg.clone()))?;
+            Ok(Zeroizing::new(*key_arr))
         }
         PROVIDER_PASSPHRASE => {
             // 取口令优先级:env(无人值守)→ 交互 stdin(tty 时提示;
@@ -374,9 +383,11 @@ pub extern "C" fn secret_vault_core_version() -> *const c_char {
 // HKDF-SHA256 域分隔派生封套密钥,加密「已解密的 secret 序列化明文」整包。
 // 导入方解开封套后用本机 provider 重新 seal 落盘——transport key 与任何
 // 实例运行时密钥解耦。
+// v2(r13):payload 内含 per-entry mtime manifest,导入侧默认拒绝早于
+// 现存文件的条目(防旧包重放,allow_older 显式放行)。
 
 pub const ENV_MAGIC: &[u8; 8] = b"DSVLTENV";
-pub const ENV_FORMAT_VERSION: u16 = 1;
+pub const ENV_FORMAT_VERSION: u16 = 2;
 pub const ENV_HEADER_LEN: usize = 8 + 2 + 2 + 12; // magic + version + reserved + nonce
 const HKDF_INFO: &[u8] = b"secret_vault.envelope.v1";
 

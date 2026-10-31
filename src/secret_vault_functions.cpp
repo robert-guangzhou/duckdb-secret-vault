@@ -72,6 +72,27 @@ static void AppendU32(string &buf, uint32_t v) {
 	}
 }
 
+static void AppendU64(string &buf, uint64_t v) {
+	for (int i = 7; i >= 0; i--) {
+		buf.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+	}
+}
+	for (int i = 3; i >= 0; i--) {
+		buf.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+	}
+}
+
+static uint64_t ReadU64(const char *&p, const char *end) {
+	if (p + 8 > end) {
+		throw SerializationException("secret_vault: malformed envelope payload (truncated u64)");
+	}
+	uint64_t v = 0;
+	for (int i = 0; i < 8; i++) {
+		v = (v << 8) | static_cast<uint8_t>(*p++);
+	}
+	return v;
+}
+
 static uint32_t ReadU32(const char *&p, const char *end) {
 	if (p + 4 > end) {
 		throw SerializationException("secret_vault: malformed envelope payload (truncated u32)");
@@ -86,14 +107,23 @@ static uint32_t ReadU32(const char *&p, const char *end) {
 struct EnvelopeEntry {
 	string name;
 	string plaintext;
+	int64_t mtime = 0; // v1.1:源文件 mtime(Unix 秒),重放判定用
 };
 
+// CR-H3:payload 含明文,先按精确总长 reserve 再拼,杜绝 std::string 扩容
+// 在堆上遗留明文中间副本
 static string EncodePayload(const vector<EnvelopeEntry> &entries) {
+	size_t total = 4;
+	for (auto &e : entries) {
+		total += 4 + e.name.size() + 8 + 4 + e.plaintext.size();
+	}
 	string buf;
+	buf.reserve(total);
 	AppendU32(buf, static_cast<uint32_t>(entries.size()));
 	for (auto &e : entries) {
 		AppendU32(buf, static_cast<uint32_t>(e.name.size()));
 		buf.append(e.name);
+		AppendU64(buf, static_cast<uint64_t>(e.mtime));
 		AppendU32(buf, static_cast<uint32_t>(e.plaintext.size()));
 		buf.append(e.plaintext);
 	}
@@ -114,6 +144,7 @@ static vector<EnvelopeEntry> DecodePayload(const string &payload) {
 		}
 		e.name.assign(p, nlen);
 		p += nlen;
+		e.mtime = static_cast<int64_t>(ReadU64(p, end));
 		uint32_t plen = ReadU32(p, end);
 		if (p + plen > end) {
 			throw SerializationException("secret_vault: malformed envelope payload (truncated plaintext)");
@@ -415,7 +446,15 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 	vector<EnvelopeEntry> entries;
 	entries.reserve(names.size());
 	for (auto &n : names) {
-		entries.push_back(EnvelopeEntry {n, VaultReadDecryptedFile(fs, fs.JoinPath(dir, n + VAULT_FILE_SUFFIX), n)});
+		string path = fs.JoinPath(dir, n + VAULT_FILE_SUFFIX);
+		EnvelopeEntry e;
+		e.name = n;
+		e.plaintext = VaultReadDecryptedFile(fs, path, n);
+		{
+			auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+			e.mtime = static_cast<int64_t>(fs.GetLastModifiedTime(*handle).value); // timestamp_t(Unix 秒)
+		}
+		entries.push_back(std::move(e));
 	}
 	string payload = EncodePayload(entries);
 
@@ -486,6 +525,7 @@ struct ImportBind : TableFunctionData {
 	string file;
 	string code; // 空 = stdin 读一行
 	string on_conflict = "error";
+	bool allow_older = false; // v1.1:默认拒绝早于现存文件的条目(防旧包重放)
 	static unique_ptr<FunctionData> Create(ClientContext &context, TableFunctionBindInput &input,
 	                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 		auto bind = make_uniq<ImportBind>();
@@ -498,6 +538,8 @@ struct ImportBind : TableFunctionData {
 				if (bind->on_conflict != "error" && bind->on_conflict != "overwrite" && bind->on_conflict != "skip") {
 					throw InvalidInputException("secret_vault_import: on_conflict must be error|overwrite|skip");
 				}
+			} else if (kv.first == "allow_older") {
+				bind->allow_older = kv.second.GetValue<bool>();
 			}
 		}
 		names.emplace_back("imported");
@@ -575,6 +617,21 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 				    "'skip')",
 				    e.name, dir);
 			}
+			// v1.1 重放防护:现存文件较新而包内条目较旧 → 默认拒绝(仅对"已存在"
+			// 条目可判;新条目无时间参照)。allow_older := true 显式放行。
+			if (exists && !bind.allow_older) {
+				int64_t existing_mtime = 0;
+				{
+					auto handle = fs.OpenFile(target, FileFlags::FILE_FLAGS_READ);
+					existing_mtime = static_cast<int64_t>(fs.GetLastModifiedTime(*handle).value);
+				}
+				if (e.mtime < existing_mtime) {
+					throw InvalidInputException(
+					    "secret_vault_import: refusing older bundle for secret '%s' (bundle mtime %lld < on-disk "
+					    "%lld; old-bundle replay). Pass allow_older := true to force",
+					    e.name, static_cast<long long>(e.mtime), static_cast<long long>(existing_mtime));
+				}
+			}
 			VaultWriteEncryptedFile(fs, dir, e.name, e.plaintext.data(), e.plaintext.size());
 			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
 			imported++;
@@ -629,6 +686,7 @@ void RegisterVaultFunctions(ExtensionLoader &loader) {
 	import_fn.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("code", LogicalType(LogicalTypeId::VARCHAR));
 		options.Add("on_conflict", LogicalType(LogicalTypeId::VARCHAR));
+		options.Add("allow_older", LogicalType(LogicalTypeId::BOOLEAN));
 	});
 	loader.RegisterFunction(import_fn);
 }

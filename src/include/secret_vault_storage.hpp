@@ -3,6 +3,7 @@
 #include "duckdb/catalog/default/default_generator.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/secret/secret_storage.hpp"
+#include "duckdb/common/serializer/write_stream.hpp"
 
 #include "secret_vault_rust.h" // PROVIDER_* / VaultBuf / vault_* C ABI
 
@@ -38,6 +39,50 @@ string VaultLastError();
 struct VaultBufGuard {
 	VaultBuf buf {nullptr, 0, 0};
 	~VaultBufGuard();
+};
+
+//! CR-H3(r13)彻底方案:清零型内存写流。扩容时旧缓冲先清零再释放,
+//! 析构清零——序列化明文不因容器扩容残留在已释放堆内存。
+class ZeroizingMemoryStream final : public WriteStream {
+public:
+	ZeroizingMemoryStream() : capacity_(4096), data_(new data_t[capacity_]) {
+	}
+	~ZeroizingMemoryStream() override {
+		if (data_) {
+			std::memset(data_, 0, capacity_);
+			delete[] data_;
+		}
+	}
+	ZeroizingMemoryStream(const ZeroizingMemoryStream &) = delete;
+	ZeroizingMemoryStream &operator=(const ZeroizingMemoryStream &) = delete;
+
+	void WriteData(const_data_ptr_t buffer, idx_t write_size) override {
+		if (pos_ + write_size > capacity_) {
+			idx_t new_cap = capacity_ * 2;
+			while (pos_ + write_size > new_cap) {
+				new_cap *= 2;
+			}
+			data_t *fresh = new data_t[new_cap];
+			std::memcpy(fresh, data_, pos_);
+			std::memset(data_, 0, capacity_); // 旧缓冲清零后释放(核心)
+			delete[] data_;
+			data_ = fresh;
+			capacity_ = new_cap;
+		}
+		std::memcpy(data_ + pos_, buffer, write_size);
+		pos_ += write_size;
+	}
+	idx_t GetPosition() const {
+		return pos_;
+	}
+	data_t *GetData() {
+		return data_;
+	}
+
+private:
+	idx_t capacity_;
+	idx_t pos_ = 0;
+	data_t *data_;
 };
 
 //! 公共助手(P3-L2 去重:storage 与 functions 共用同一实现)

@@ -299,8 +299,9 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 		}
 	}
 
-	// 1. 序列化到内存(DuckDB 原生二进制格式,类型无关)
-	MemoryStream plain_stream;
+	// 1. 序列化到内存(DuckDB 原生二进制格式,类型无关)。
+	// CR-H3(r13):改用清零型写流——扩容旧缓冲与终态缓冲均不残留明文
+	ZeroizingMemoryStream plain_stream;
 	{
 		BinarySerializer serializer(plain_stream);
 		serializer.Begin();
@@ -315,9 +316,8 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 	string name = file_name.substr(0, file_name.size() - string(VAULT_FILE_SUFFIX).size());
 	VaultWriteEncryptedFile(fs, vault_path, name, plain, plain_len);
 
-	// 卫生:序列化明文缓冲即用即清(清整个 capacity,CR-H3 缓解;
-	// 设计债:扩容中间缓冲未清零,彻底方案需清零型 WriteStream)
-	vault_zeroize_buf(plain, plain_stream.GetCapacity());
+	// 卫生:序列化明文用后即清(ZeroizingMemoryStream 析构亦会清零,双保险)
+	vault_zeroize_buf(plain, plain_len);
 	// 写入成功后才锁定目录变更(诚实审查 LOW-3:失败不锁定)
 	has_written = true;
 }
