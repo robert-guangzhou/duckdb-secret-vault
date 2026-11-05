@@ -57,3 +57,8 @@
   provider/env;恢复步骤见 README)。极端场景需手动重设旧口令后重试。
 - 封套 v1.1 起含 per-entry mtime,导入默认拒绝早于现存文件的条目(防旧包重放);
   对**目标不存在**的新条目无时间参照,不做重放判定。
+- **KEY_OLD 轮换过渡窗口**(v1.1,env provider):`SECRET_VAULT_KEY_OLD` 与主密钥同为
+  满权限密钥材料、共存于进程环境直至撤除——窗口期"旧钥泄露=旧密文全泄"的旧边界
+  依旧存在;撤除步骤是 runbook 的必做收尾。
+- passphrase 交互输入已隐藏回显(v1.1,termios/SetConsoleMode);关闭失败时降级为
+  可见输入并打印 WARNING(不静默)。

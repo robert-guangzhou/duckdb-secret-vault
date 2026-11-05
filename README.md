@@ -19,6 +19,11 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > - **passphrase provider**:口令需 ≥4 个随机词或 ≥16 字符随机串;弱口令可被
 >   离线暴力猜测(Argon2id 抬高单次成本但不替代熵);**遗忘即数据不可恢复**。
 > - 传输封套的一次性码:导出结果行显示一次,经密码管理器/口头传递;再导出即作废旧包。
+> - **import 即时可见**(v1.1):导入落盘后当前进程立即可用(内部触发热加载)。
+> - **KEY_OLD 轮换过渡**(v1.1,env provider):换钥窗口内设 `SECRET_VAULT_KEY_OLD=旧钥`
+>   可继续读旧密文;轮换 runbook:①全实例部署 {KEY=新,KEY_OLD=旧} 并重启 → ②发布新密文
+>   (`secret_vault_rotate` 或目录重写)→ ③观察期 → ④撤除 KEY_OLD。仅 env provider;
+>   keyring 主密钥被进程缓存,**外部轮换 keyring 主密钥后需重启进程**。
 >
 > ## 常用操作
 >
@@ -30,7 +35,8 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > SELECT * FROM secret_vault_migrate();          -- local_file 明文迁入(默认保留源)
 > SELECT * FROM secret_vault_rotate(new_provider := 'env');
 > SELECT * FROM secret_vault_export('/tmp/b.svb');  -- 一次性码显示于结果行
-> SELECT * FROM secret_vault_import('/tmp/b.svb');  -- 默认 stdin 输码;code := '...' 供自动化(会入 SQL 历史)
+> SELECT * FROM secret_vault_import('/tmp/b.svb');  -- 默认 stdin 输码(隐藏回显);code := '...' 供自动化(会入 SQL 历史)
+> SELECT * FROM secret_vault_reload();              -- 热加载:长驻实例重扫目录(增/改/删对齐,坏文件聚合报告)
 > ```
 >
 > ⚠ 已知边界:文件损坏(篡改/坏密钥遗留)时 `CREATE OR REPLACE` 会因懒加载失败而报错,
@@ -40,7 +46,10 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > - `secret_vault_migrate` 同名冲突默认报错,`on_conflict := 'overwrite'|'skip'` 显式选择;源文件须为 600 私有权限。
 > - `secret_vault_rotate` 为两遍式:读阶段任一失败不动盘;**写阶段中途失败会留下新旧密钥混合状态**(进程已自动恢复旧 provider 与旧环境密钥)——恢复步骤:重新以旧口令/密钥 SET 后再次 rotate。
 > - `secret_vault_export` 的信封文件以 600 私有权限落盘(承载全部 secret 明文,仅一次性码保护)。
-> - passphrase 的交互提示只在 stdin 为 tty 且未设环境变量时出现;多连接并发触发提示属未定义行为(单会话设计)。
+> - passphrase 的交互提示只在 stdin 为 tty 且未设环境变量时出现,**输入隐藏回显**
+>   (v1.1;termios/SetConsoleMode 关闭失败时降级为可见输入并打印 WARNING);多连接并发触发提示属未定义行为(单会话设计)。
+> - `secret_vault_reload` 前请先关闭正在使用 secret 的活动查询/连接(reload 会整体重建
+>   该存储的 catalog;持旧条目引用的活动查询行为未定义)。
 > - `secret_vault_provider` 是**进程级全局**设置:任一会话 SET 后对全进程生效,
 >   多会话并发设不同值属未定义行为(单会话/单调度进程场景设计)。
 > - 存储实例为**单 DatabaseInstance 假设**;同进程 attach 多个数据库并各自 LOAD 时,
