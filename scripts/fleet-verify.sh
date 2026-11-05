@@ -57,8 +57,9 @@ echo "SELECT 'F2b', count(*) FROM duckdb_secrets() WHERE name='g1';" >&3
 sleep 1
 # F6:外部进程导出 bundle → FIFO 内 import → 同进程立即可见
 $DUCKDB -unsigned -noheader -list -c "LOAD '$SV'; SET secret_vault_provider='env'; CREATE PERSISTENT SECRET e1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'F6-1'); CREATE PERSISTENT SECRET e2 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'F6-2');" >/dev/null
-$DUCKDB -unsigned -noheader -list -c "LOAD '$SV'; SET secret_vault_provider='env'; SELECT secrets FROM secret_vault_export('/tmp/f6.svb');" >/dev/null
-echo "SELECT 'F6i', imported, skipped FROM secret_vault_import('/tmp/f6.svb', on_conflict := 'overwrite');" >&3
+F6CODE=$($DUCKDB -unsigned -noheader -list -c "LOAD '$SV'; SET secret_vault_provider='env'; SELECT transport_code FROM secret_vault_export('/tmp/f6.svb');" | tail -1)
+echo "F6 code len=${#F6CODE}"
+echo "SELECT 'F6i', imported, skipped FROM secret_vault_import('/tmp/f6.svb', code := '$F6CODE', on_conflict := 'overwrite');" >&3
 echo "SELECT 'F6v', count(*) FROM duckdb_secrets() WHERE name IN ('e1','e2');" >&3
 echo "SELECT 'DONE-MARK', 1;" >&3
 exec 3>&-
@@ -99,7 +100,7 @@ echo "== F5. tty 无回显(pty) =="
 export HOME=/tmp/vh-p5-f5; rm -rf "$HOME"; mkdir -p "$HOME"
 unset SECRET_VAULT_KEY
 python3 - <<'PY'
-import os, pty, select, time, sys
+import os, pty, select, subprocess, time, sys
 
 SV = "/workspace/build/reldebug/extension/secret_vault/secret_vault.duckdb_extension"
 PASS = b"p5-hidden-pass"

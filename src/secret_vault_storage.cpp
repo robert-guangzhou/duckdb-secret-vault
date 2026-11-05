@@ -332,17 +332,33 @@ VaultReloadStats VaultSecretStorage::Reload(string &detail) {
 			stats.changed++;
 		}
 		if (!known || changed) {
+			// 两级校验(r15):①解密(AEAD/tag)②反序列化——后者捕获"密钥正确但
+			// 内容损坏"的文件(fleet-verify F1 实测暴露的缺口),避免其毒化 catalog
+			string pt;
 			try {
-				string pt = VaultReadDecryptedFile(fs, fs.JoinPath(vault_path, kv.first + VAULT_FILE_SUFFIX),
-				                                   kv.first);
-				vault_zeroize_buf(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
+				pt = VaultReadDecryptedFile(fs, fs.JoinPath(vault_path, kv.first + VAULT_FILE_SUFFIX), kv.first);
 			} catch (std::exception &ex) {
 				stats.invalid++;
 				invalid.insert(kv.first);
 				ErrorData error(ex);
 				detail += (detail.empty() ? "" : "; ");
 				detail += kv.first + ": " + error.RawMessage();
+				continue;
 			}
+			try {
+				MemoryStream stream(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
+				BinaryDeserializer deserializer(stream);
+				deserializer.Begin();
+				auto secret = secret_manager.DeserializeSecret(deserializer, vault_path);
+				deserializer.End();
+			} catch (std::exception &ex) {
+				stats.invalid++;
+				invalid.insert(kv.first);
+				ErrorData error(ex);
+				detail += (detail.empty() ? "" : "; ");
+				detail += kv.first + " (decrypt ok, deserialize failed): " + error.RawMessage();
+			}
+			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
 		}
 	}
 	for (auto &kv : file_states_) {
