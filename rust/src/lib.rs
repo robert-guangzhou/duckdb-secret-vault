@@ -78,6 +78,70 @@ pub type VaultResult<T> = Result<T, VaultError>;
 
 // ==== KeyProvider ====
 
+/// tty 无回显读口令(阶段B/r14)。失败返回 Err → 调用方降级为可见输入 + 警告。
+#[cfg(unix)]
+fn read_passphrase_hidden(prompt: &str) -> std::io::Result<String> {
+    use std::io::{self, BufRead, Write};
+    let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut noecho = saved;
+    noecho.c_lflag &= !libc::ECHO;
+    if unsafe { libc::tcsetattr(0, libc::TCSANOW, &noecho) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let read_result = (|| {
+        let mut stderr = io::stderr();
+        write!(stderr, "{prompt}")?;
+        stderr.flush()?;
+        let mut line = String::new();
+        io::stdin().lock().read_line(&mut line)?;
+        writeln!(stderr)?; // 回显关闭时补换行
+        Ok(line)
+    })();
+    // 无论读成败都恢复原 termios(guard 语义)
+    unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
+    read_result
+}
+
+#[cfg(windows)]
+fn read_passphrase_hidden(prompt: &str) -> std::io::Result<String> {
+    use std::io::{self, Write};
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Handle(*mut core::ffi::c_void);
+    extern "system" {
+        fn GetStdHandle(which: u32) -> Handle;
+        fn GetConsoleMode(h: Handle, mode: *mut u32) -> i32;
+        fn SetConsoleMode(h: Handle, mode: u32) -> i32;
+    }
+    const STD_INPUT_HANDLE: u32 = u32::MAX - 9; // (DWORD)-10
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        let mut mode: u32 = 0;
+        if GetConsoleMode(h, &mut mode) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let saved = mode;
+        if SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let res = (|| {
+            let mut stderr = io::stderr();
+            write!(stderr, "{prompt}")?;
+            stderr.flush()?;
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            writeln!(stderr)?;
+            Ok(line)
+        })();
+        SetConsoleMode(h, saved);
+        res
+    }
+}
+
 fn load_or_create_keyring_master() -> VaultResult<[u8; KEY_LEN]> {
     let entry = keyring::Entry::new("duckdb.secret_vault", "master")
         .map_err(|e| VaultError::KeyUnavailable(format!("keyring: {e}")))?;
@@ -126,15 +190,28 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8;
                 Err(_) => {
                     use std::io::IsTerminal;
                     if std::io::stdin().is_terminal() {
-                        eprint!("secret_vault: enter passphrase: ");
-                        let mut line = String::new();
-                        std::io::stdin()
-                            .read_line(&mut line)
-                            .map_err(|e| VaultError::KeyUnavailable(format!("stdin: {e}")))?;
-                        if line.trim().is_empty() {
-                            return Err(VaultError::KeyUnavailable("empty passphrase".into()));
+                        // tty 无回显(阶段B/r14):termios(Unix)/SetConsoleMode(Windows);
+                        // 失败降级为明文回显 + WARNING 行,不静默(计划 3.2)
+                        match read_passphrase_hidden("secret_vault: enter passphrase (input hidden): ") {
+                            Ok(line) => {
+                                if line.trim().is_empty() {
+                                    return Err(VaultError::KeyUnavailable("empty passphrase".into()));
+                                }
+                                Zeroizing::new(line.trim().to_string())
+                            }
+                            Err(e) => {
+                                eprintln!("WARNING: echo could not be disabled ({e}); input will be visible");
+                                eprint!("secret_vault: enter passphrase: ");
+                                let mut line = String::new();
+                                std::io::stdin()
+                                    .read_line(&mut line)
+                                    .map_err(|e2| VaultError::KeyUnavailable(format!("stdin: {e2}")))?;
+                                if line.trim().is_empty() {
+                                    return Err(VaultError::KeyUnavailable("empty passphrase".into()));
+                                }
+                                Zeroizing::new(line.trim().to_string())
+                            }
                         }
-                        Zeroizing::new(line.trim().to_string())
                     } else {
                         return Err(VaultError::KeyUnavailable(format!(
                             "{ENV_PASSPHRASE} not set and stdin is not interactive"
@@ -245,9 +322,30 @@ pub fn open(provider: u8, name: &str, blob: &[u8]) -> VaultResult<Vec<u8>> {
     let mut aad = blob[..HEADER_LEN].to_vec();
     aad.extend_from_slice(name.as_bytes());
 
-    cipher
-        .decrypt(nonce, Payload { msg: &blob[HEADER_LEN..], aad: &aad })
-        .map_err(|_| VaultError::OpenFailed)
+    match cipher.decrypt(nonce, Payload { msg: &blob[HEADER_LEN..], aad: &aad }) {
+        Ok(pt) => Ok(pt),
+        // KEY_OLD(r14,fleet 阶段A):轮换过渡回退——仅在 provider==ENV 且恰好
+        // tag mismatch 时尝试 SECRET_VAULT_KEY_OLD;其他 provider/错误不回退
+        // (计划 3.1:避免性能损耗与语义混淆)。回退钥材料用后清零。
+        Err(_) if provider == PROVIDER_ENV => {
+            if let Ok(old_b64) = std::env::var("SECRET_VAULT_KEY_OLD") {
+                if let Ok(raw) = B64.decode(old_b64.trim()) {
+                    if raw.len() == KEY_LEN {
+                        let mut old_key = Zeroizing::new([0u8; KEY_LEN]);
+                        old_key.copy_from_slice(&raw);
+                        let cipher_old = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*old_key));
+                        if let Ok(pt) =
+                            cipher_old.decrypt(nonce, Payload { msg: &blob[HEADER_LEN..], aad: &aad })
+                        {
+                            return Ok(pt);
+                        }
+                    }
+                }
+            }
+            Err(VaultError::OpenFailed)
+        }
+        Err(_) => Err(VaultError::OpenFailed),
+    }
 }
 
 // ==== C ABI(供 C++ 存储层调用;密钥材料不出 Rust) ====
@@ -768,6 +866,38 @@ mod tests {
         // 非法字符/长度拒绝
         assert!(base32_to_key("NOT-A-VALID-CODE-!!!").is_none());
         assert!(base32_to_key("AAAA").is_none());
+    }
+
+    // ==== fleet 阶段A:KEY_OLD 轮换过渡 ====
+
+    #[test]
+    fn tp0f_key_old_fallback_env_only() {
+        let _g = ENV_LOCK.lock().unwrap();
+        // 旧钥 K1 加密
+        std::env::set_var(ENV_KEY, B64.encode([0xA1u8; KEY_LEN]));
+        let blob = seal(PROVIDER_ENV, "s", b"rotate-me").unwrap();
+        // 主钥换 K2 + KEY_OLD=K1 → 回退可读
+        std::env::set_var(ENV_KEY, B64.encode([0xB2u8; KEY_LEN]));
+        std::env::set_var("SECRET_VAULT_KEY_OLD", B64.encode([0xA1u8; KEY_LEN]));
+        assert!(open(PROVIDER_ENV, "s", &blob).is_ok(), "fallback must read K1 files");
+        // 撤除 KEY_OLD → AEAD 失败
+        std::env::remove_var("SECRET_VAULT_KEY_OLD");
+        assert!(matches!(open(PROVIDER_ENV, "s", &blob), Err(VaultError::OpenFailed)));
+        // KEY_OLD 垃圾值 → 同样失败,不 panic
+        std::env::set_var("SECRET_VAULT_KEY_OLD", "not-base64!!");
+        assert!(matches!(open(PROVIDER_ENV, "s", &blob), Err(VaultError::OpenFailed)));
+        std::env::remove_var("SECRET_VAULT_KEY_OLD");
+        // 非 ENV provider 不回退:passphrase 文件 + KEY_OLD 在场 → 仍 AEAD 失败
+        std::env::set_var(ENV_PASSPHRASE, "pp");
+        let pb = seal(PROVIDER_PASSPHRASE, "s2", b"y").unwrap();
+        std::env::set_var("SECRET_VAULT_KEY_OLD", B64.encode([0xA1u8; KEY_LEN]));
+        assert!(matches!(open(PROVIDER_PASSPHRASE, "s2", &pb), Err(VaultError::OpenFailed)),
+            "fallback must not apply to non-env providers");
+        // 错误文本不含密钥字节(F5 类断言)
+        std::env::remove_var("SECRET_VAULT_KEY_OLD");
+        let err = open(PROVIDER_PASSPHRASE, "s2", &pb).unwrap_err().to_string();
+        assert!(!err.contains("pp"), "error must not contain passphrase");
+        std::env::remove_var(ENV_PASSPHRASE);
     }
 
     // AES-256-GCM 官方向量(NIST AES-256-GCM PDF,Test Case 16)

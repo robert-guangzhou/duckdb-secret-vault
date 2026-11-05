@@ -16,10 +16,48 @@
 
 #include <atomic>
 #include <cstring>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
 namespace duckdb {
 
 const string LOCAL_ENCRYPTED_STORAGE_NAME = "local_encrypted";
+
+//===--------------------------------------------------------------------===//
+// 文件状态快照(v1.1 fleet 阶段A/r14:reload 变更检测)
+//===--------------------------------------------------------------------===//
+
+//! 采集目录内全部 .vault 文件的 (mtime µs, size);unreadable 文件跳过。
+static void CaptureFileStates(FileSystem &fs, const string &dir,
+                              std::unordered_map<string, std::pair<int64_t, uint64_t>> &states) {
+	states.clear();
+	if (!fs.DirectoryExists(dir)) {
+		return;
+	}
+	fs.ListFiles(dir, [&](const string &fname, bool is_dir) {
+		if (is_dir || !StringUtil::EndsWith(fname, VAULT_FILE_SUFFIX)) {
+			return;
+		}
+		string path = fs.JoinPath(dir, fname);
+		int64_t mtime = 0;
+		uint64_t size = 0;
+		try {
+			auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+			mtime = static_cast<int64_t>(fs.GetLastModifiedTime(*handle).value);
+		} catch (std::exception &) {
+			return;
+		}
+		try {
+			BufferedFileReader r(fs, path.c_str());
+			size = r.FileSize();
+		} catch (std::exception &) {
+			return;
+		}
+		states.emplace(fname.substr(0, fname.size() - string(VAULT_FILE_SUFFIX).size()),
+		               std::make_pair(mtime, size));
+	});
+}
 
 //===--------------------------------------------------------------------===//
 // VaultBuf RAII 守卫(全面 review CR-H1/H2 修复)
@@ -213,8 +251,10 @@ VaultSecretStorage::VaultSecretStorage(SecretManager &manager, DatabaseInstance 
       vault_path(FileSystem::ExpandPath(vault_path_p, nullptr)) {
 	persistent = true;
 
+	auto &fs = FileSystem::GetLocal(db);
 	try {
 		ScanDirectory();
+		CaptureFileStates(fs, vault_path, file_states_);
 	} catch (PermissionException &ex) {
 		if (!DBConfig::GetConfig(db).file_system->SubSystemIsDisabled("LocalFileSystem")) {
 			throw;
@@ -261,12 +301,74 @@ void VaultSecretStorage::RebindDirectory(const string &new_path) {
 	}
 	vault_path = FileSystem::ExpandPath(new_path, nullptr);
 	ScanDirectory();
+	CaptureFileStates(fs, vault_path, file_states_);
 	// 生成器持有扫描集的副本:目录变更后必须重建,否则同会话看不到
 	// 新目录中的既有文件(诚实审查 HIGH-1 修复;空状态下重建 CatalogSet 安全)
 	auto &catalog = Catalog::GetSystemCatalog(db);
 	secrets = make_uniq<CatalogSet>(catalog,
 	                                make_uniq<VaultSecretGenerator>(catalog, manager, persistent_secrets, file_names,
 	                                                                vault_path));
+}
+
+VaultReloadStats VaultSecretStorage::Reload(string &detail) {
+	lock_guard<mutex> guard(rebind_lock);
+	VaultReloadStats stats;
+	auto &fs = FileSystem::GetLocal(db);
+
+	// 1. 磁盘现状(计划 3.1:mtime+size 变更检测)
+	std::unordered_map<string, std::pair<int64_t, uint64_t>> disk;
+	CaptureFileStates(fs, vault_path, disk);
+
+	// 2. 变化分类 + 新/改文件逐个校验(失败聚合不中断,计划 3.1)
+	std::unordered_set<string> invalid;
+	for (auto &kv : disk) {
+		auto it = file_states_.find(kv.first);
+		bool known = it != file_states_.end();
+		bool changed = known && it->second != kv.second;
+		if (!known) {
+			stats.added++;
+		} else if (changed) {
+			stats.changed++;
+		}
+		if (!known || changed) {
+			try {
+				string pt = VaultReadDecryptedFile(fs, fs.JoinPath(vault_path, kv.first + VAULT_FILE_SUFFIX),
+				                                   kv.first);
+				vault_zeroize_buf(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
+			} catch (std::exception &ex) {
+				stats.invalid++;
+				invalid.insert(kv.first);
+				ErrorData error(ex);
+				detail += (detail.empty() ? "" : "; ");
+				detail += kv.first + ": " + error.RawMessage();
+			}
+		}
+	}
+	for (auto &kv : file_states_) {
+		if (disk.find(kv.first) == disk.end()) {
+			stats.removed++;
+		}
+	}
+
+	// 3. 全量重建(排除 invalid 文件避免毒化 catalog;文件保留在磁盘,reload 报告中可见)
+	persistent_secrets.clear();
+	file_names.clear();
+	for (auto &kv : disk) {
+		if (invalid.count(kv.first)) {
+			continue;
+		}
+		Identifier id(kv.first);
+		persistent_secrets.insert(id);
+		file_names.emplace(std::move(id), kv.first);
+	}
+	auto &catalog = Catalog::GetSystemCatalog(db);
+	secrets = make_uniq<CatalogSet>(catalog,
+	                                make_uniq<VaultSecretGenerator>(catalog, manager, persistent_secrets, file_names,
+	                                                                vault_path));
+
+	// 4. 状态快照更新(含 invalid 文件:修复重写后 mtime 变化会再次触发校验)
+	file_states_ = std::move(disk);
+	return stats;
 }
 
 idx_t VaultSecretStorage::CountFilesOnDisk() {
@@ -320,6 +422,8 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 	vault_zeroize_buf(plain, plain_len);
 	// 写入成功后才锁定目录变更(诚实审查 LOW-3:失败不锁定)
 	has_written = true;
+	// reload 变更检测:写入使快照失效(下次 reload 视为新增并重校验)
+	file_states_.erase(name);
 }
 
 void VaultSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) {
@@ -327,6 +431,7 @@ void VaultSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_ent
 	string file = fs.JoinPath(vault_path, name + VAULT_FILE_SUFFIX);
 	persistent_secrets.erase(Identifier(name));
 	file_names.erase(Identifier(name));
+	file_states_.erase(name); // reload 变更检测快照同步
 	try {
 		fs.RemoveFile(file);
 	} catch (std::exception &ex) {

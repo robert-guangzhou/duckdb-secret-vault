@@ -393,6 +393,49 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 }
 
 //===--------------------------------------------------------------------===//
+// secret_vault_reload()(v1.1 fleet 阶段A/r14):重扫+校验+热加载
+//===--------------------------------------------------------------------===//
+
+struct ReloadBind : TableFunctionData {
+	static unique_ptr<FunctionData> Create(ClientContext &context, TableFunctionBindInput &input,
+	                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
+		names.emplace_back("added");
+		return_types.emplace_back(LogicalType::UBIGINT);
+		names.emplace_back("changed");
+		return_types.emplace_back(LogicalType::UBIGINT);
+		names.emplace_back("removed");
+		return_types.emplace_back(LogicalType::UBIGINT);
+		names.emplace_back("invalid");
+		return_types.emplace_back(LogicalType::UBIGINT);
+		names.emplace_back("detail");
+		return_types.emplace_back(LogicalType::VARCHAR);
+		return nullptr;
+	}
+};
+
+static void ReloadExecute(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &global = data.global_state->Cast<OnceGlobal>();
+	if (global.done) {
+		output.SetCardinality(0);
+		return;
+	}
+	global.done = true;
+
+	auto storage = GetVaultStorage();
+	if (!storage) {
+		throw InvalidInputException("secret_vault: storage not initialized");
+	}
+	string detail;
+	auto stats = storage->Reload(detail);
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value::UBIGINT(stats.added));
+	output.SetValue(1, 0, Value::UBIGINT(stats.changed));
+	output.SetValue(2, 0, Value::UBIGINT(stats.removed));
+	output.SetValue(3, 0, Value::UBIGINT(stats.invalid));
+	output.SetValue(4, 0, Value(detail));
+}
+
+//===--------------------------------------------------------------------===//
 // secret_vault_export():vault 文件 → 一次性加密封套 + 长密钥码(结果列显示一次)
 //===--------------------------------------------------------------------===//
 
@@ -639,6 +682,18 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 		}
 		throw;
 	}
+	// v1.1 阶段C(r14):import 后即时热加载(复用阶段A Reload 重建机制,
+	// 同进程立即可见;失败显式降级为新进程生效,不静默)
+	string reload_detail;
+	try {
+		storage->Reload(reload_detail);
+	} catch (std::exception &ex) {
+		reload_detail = ErrorData(ex).RawMessage();
+		fprintf(stderr, "secret_vault: import written to disk, but hot reload deferred to next process: %s
+",
+		        reload_detail.c_str());
+	}
+
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value::UBIGINT(imported));
 	output.SetValue(1, 0, Value::UBIGINT(skipped));
@@ -649,6 +704,10 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 //===--------------------------------------------------------------------===//
 
 void RegisterVaultFunctions(ExtensionLoader &loader) {
+	TableFunction reload_fn(Identifier("secret_vault_reload"), FunctionSignature(), ReloadExecute, ReloadBind::Create,
+	                        OnceGlobal::Init);
+	loader.RegisterFunction(reload_fn);
+
 	// 注意:v2.0 表函数签名 API——位置参数经 FunctionSignature,具名参数经
 	// GetSignature().WithTypedKkwargs(nats_rw 同款);bind 侧仍读 input.named_parameters。
 	TableFunction migrate_fn(Identifier("secret_vault_migrate"), FunctionSignature(), MigrateExecute,

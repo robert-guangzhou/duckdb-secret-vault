@@ -9,6 +9,9 @@
 
 #include <atomic>
 #include <mutex>
+#include <cstring>
+#include <unordered_map>
+#include <utility>
 
 namespace duckdb {
 
@@ -20,6 +23,14 @@ constexpr int64_t LOCAL_ENCRYPTED_STORAGE_OFFSET = 21;
 
 //! 文件名:<name>.duckdb_secret.vault
 constexpr const char *VAULT_FILE_SUFFIX = ".duckdb_secret.vault";
+
+//! reload 统计(TP-F1;v1.1 fleet 阶段A/r14)
+struct VaultReloadStats {
+	idx_t added = 0;
+	idx_t changed = 0;
+	idx_t removed = 0;
+	idx_t invalid = 0;
+};
 
 //===--------------------------------------------------------------------===//
 // 全局配置(经 DuckDB settings 暴露,见 secret_vault_extension.cpp)
@@ -146,6 +157,11 @@ public:
 		return vault_path;
 	}
 
+	//! v1.1 fleet(阶段A/r14):重扫目录 → 逐文件校验(失败聚合不中断)→
+	//! 全量重建 CatalogSet+生成器(热加载;活动连接边界见 README)。
+	//! detail 聚合失败文本(无敏感字节)。
+	VaultReloadStats Reload(string &detail);
+
 protected:
 	void WriteSecret(const BaseSecret &secret, OnCreateConflict on_conflict) override;
 	void RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) override;
@@ -156,6 +172,9 @@ private:
 	SecretManager &manager;
 	identifier_set_t persistent_secrets;
 	identifier_map_t<string> file_names;
+	//! 文件状态快照(reload 变更检测):原始名 → (mtime µs, size)。
+	//! 与 catalog 懒加载无关(不随加载擦除),仅 reload/写/删时维护。
+	std::unordered_map<string, std::pair<int64_t, uint64_t>> file_states_;
 	string vault_path;
 	mutex rebind_lock;
 	//! 是否发生过写入(限制 secret_vault_directory 只能在空状态变更)

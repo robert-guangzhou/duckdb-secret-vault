@@ -1,0 +1,45 @@
+# name: test/sql/fleet-distribute.test
+# description: v1.1 fleet —— reload 统计语义(进程内可测面;TP-F1 的 SQL 面)
+# group: [sql]
+# plan: plans/secret-vault-v11-enhancements-plan.md — 阶段A
+# 运行前置(runner 负责):SECRET_VAULT_KEY 已设;HOME 隔离。
+# 说明:跨进程变更的长驻热加载(TP-F2)需外部文件操作,由 scripts/fleet-verify.sh 覆盖;
+#   本文件验证 reload 统计在进程内状态序列下的语义。
+
+require secret_vault
+
+statement ok
+SET secret_vault_provider = 'env';
+
+# 快照一致(刚写入即入快照)→ reload 全零
+statement ok
+CREATE PERSISTENT SECRET fd1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'FD-1');
+
+query IIII
+SELECT added, changed, removed, invalid FROM secret_vault_reload();
+----
+0	0	0	0
+
+# OR REPLACE 使快照失效(WriteSecret 擦除该名状态)→ reload 视为 added 并重校验
+statement ok
+CREATE OR REPLACE PERSISTENT SECRET fd1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'FD-2');
+
+query IIII
+SELECT added, changed, removed, invalid FROM secret_vault_reload();
+----
+1	0	0	0
+
+# 重建后懒加载可读、脱敏不变
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'fd1' AND secret_string LIKE '%password=redacted%';
+----
+1
+
+# 进程内 DROP:文件与快照同步删除 → reload 无 removed(外部删除才会计)
+statement ok
+DROP PERSISTENT SECRET fd1;
+
+query IIII
+SELECT added, changed, removed, invalid FROM secret_vault_reload();
+----
+0	0	0	0
