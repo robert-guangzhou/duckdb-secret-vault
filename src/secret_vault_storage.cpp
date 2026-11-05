@@ -349,7 +349,7 @@ VaultReloadStats VaultSecretStorage::Reload(string &detail) {
 				MemoryStream stream(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
 				BinaryDeserializer deserializer(stream);
 				deserializer.Begin();
-				auto secret = secret_manager.DeserializeSecret(deserializer, vault_path);
+				auto secret = manager.DeserializeSecret(deserializer, vault_path);
 				deserializer.End();
 			} catch (std::exception &ex) {
 				stats.invalid++;
