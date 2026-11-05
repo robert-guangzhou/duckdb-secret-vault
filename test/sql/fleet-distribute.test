@@ -31,6 +31,12 @@ SELECT added, changed, removed, invalid FROM secret_vault_reload();
 ----
 1	0	0	0
 
+# 采用后幂等(HC8-L1):条目已被采用且文件未变 → 再 reload 必为全零(状态收敛)
+query IIII
+SELECT added, changed, removed, invalid FROM secret_vault_reload();
+----
+0	0	0	0
+
 # 重建后懒加载可读、脱敏不变
 query I
 SELECT count(*) FROM duckdb_secrets() WHERE name = 'fd1' AND secret_string LIKE '%password=redacted%';
