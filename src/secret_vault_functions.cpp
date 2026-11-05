@@ -689,8 +689,8 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 		storage->Reload(reload_detail);
 	} catch (std::exception &ex) {
 		reload_detail = ErrorData(ex).RawMessage();
-		fprintf(stderr, "secret_vault: import written to disk, but hot reload deferred to next process: %s
-",
+		fprintf(stderr,
+		        "secret_vault: import written to disk, but hot reload deferred to next process: %s\n",
 		        reload_detail.c_str());
 	}
 
