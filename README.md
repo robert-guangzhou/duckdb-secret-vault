@@ -3,10 +3,12 @@
 DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密**存储
 (存储名 `local_encrypted`),替换默认 `local_file` 的明文落盘。
 
-> **当前状态:阶段零~三完成(v0.1 功能面齐备)**
+> **当前状态:v1.1 功能齐备(阶段零~四全部完成)**
 > —— 加密存储(AES-256-GCM,keyring/passphrase/env 三 provider)+ 运维函数
-> (`secret_vault_migrate/rotate/export/import/status`)+ 一次性封套跨实例转移
-> (stdin 输码)+ nats_rw 真实联调验证。阶段四(威胁模型文档/社区提交)待做。
+> (`secret_vault_migrate/rotate/export/import/status/reload`)+ 一次性封套跨实例转移
+> (stdin 隐藏输码,含重放防护)+ nats_rw 真实联调 + **v1.1 fleet 增强**(热加载/KEY_OLD
+> 轮换过渡)。阶段四文档(THREAT-MODEL/UPDATING/description.yml)已完成;
+> 唯一待办 = GitHub 发布与社区提交(需外网管道)。
 >
 > ## 密钥生成指南(部署前必读)
 >

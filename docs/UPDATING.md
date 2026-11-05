@@ -20,7 +20,7 @@ duckdb 升级可能破坏编译。流程如下(蓝本:tresor spec 014/038、nats
 ```bash
 # builder 容器内
 make reldebug
-cargo test                      # rust 侧 16 用例(若 rust 无改动可直接复跑)
+cargo test                      # rust 侧 17 用例:13 lib(含 KEY_OLD 回退)+ 2 FFI + 2 向量
 ./build/reldebug/test/unittest test/sql/spike-storage-registration.test   # 存储注册冒烟
 ```
 
