@@ -300,6 +300,7 @@ void VaultSecretStorage::RebindDirectory(const string &new_path) {
 		    vault_path);
 	}
 	vault_path = FileSystem::ExpandPath(new_path, nullptr);
+	auto &fs = FileSystem::GetLocal(db);
 	ScanDirectory();
 	CaptureFileStates(fs, vault_path, file_states_);
 	// 生成器持有扫描集的副本:目录变更后必须重建,否则同会话看不到
