@@ -691,6 +691,11 @@ mod tests {
     // env 变量是进程级共享,cargo test 默认多线程并行 → 串行化所有动 env 的测试
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        // 容忍 poison:某用例 panic 后不再让全组 PoisonError 级联(r14 实测教训)
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn env_provider_key() -> u8 {
         // 测试用 env provider(不依赖 keychain/口令输入)
         std::env::set_var(ENV_KEY, B64.encode([7u8; KEY_LEN]));
@@ -699,7 +704,7 @@ mod tests {
 
     #[test]
     fn tp01_format_roundtrip() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = env_provider_key();
         let blob = seal(p, "s1", b"duckdb-serialized-blob").unwrap();
         assert_eq!(&blob[0..8], MAGIC);
@@ -712,7 +717,7 @@ mod tests {
 
     #[test]
     fn tp03_aad_name_binding() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = env_provider_key();
         let blob = seal(p, "secret_a", b"payload").unwrap();
         // 改名后解密必须失败(AAD 绑定 secret 名)
@@ -726,7 +731,7 @@ mod tests {
 
     #[test]
     fn tp06_nonce_randomness() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = env_provider_key();
         let a = seal(p, "s", b"same plaintext").unwrap();
         let b = seal(p, "s", b"same plaintext").unwrap();
@@ -736,7 +741,7 @@ mod tests {
 
     #[test]
     fn tp04_passphrase_deterministic_and_salted() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::set_var(ENV_PASSPHRASE, "correct horse battery staple");
         let blob = seal(PROVIDER_PASSPHRASE, "s", b"x").unwrap();
         let pt = open(PROVIDER_PASSPHRASE, "s", &blob).unwrap();
@@ -754,7 +759,7 @@ mod tests {
 
     #[test]
     fn tp04b_env_key_validation() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::set_var(ENV_KEY, "not-base64!!!");
         let err = seal(PROVIDER_ENV, "s", b"x").unwrap_err();
         assert!(matches!(err, VaultError::BadKeyMaterial(_)));
@@ -765,7 +770,7 @@ mod tests {
 
     #[test]
     fn tp0x_provider_mismatch_and_magic() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let p = env_provider_key();
         let blob = seal(p, "s", b"x").unwrap();
         // provider 不匹配(文件由 env 写,按 passphrase 读)
@@ -781,7 +786,7 @@ mod tests {
 
     #[test]
     fn tp0x_error_text_has_no_key_material() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         std::env::set_var(ENV_KEY, B64.encode([9u8; KEY_LEN]));
         let _ = std::env::var(ENV_KEY).unwrap();
         let secret_b64 = B64.encode([9u8; KEY_LEN]);
@@ -872,7 +877,7 @@ mod tests {
 
     #[test]
     fn tp0f_key_old_fallback_env_only() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         // 旧钥 K1 加密
         std::env::set_var(ENV_KEY, B64.encode([0xA1u8; KEY_LEN]));
         let blob = seal(PROVIDER_ENV, "s", b"rotate-me").unwrap();
@@ -887,9 +892,12 @@ mod tests {
         std::env::set_var("SECRET_VAULT_KEY_OLD", "not-base64!!");
         assert!(matches!(open(PROVIDER_ENV, "s", &blob), Err(VaultError::OpenFailed)));
         std::env::remove_var("SECRET_VAULT_KEY_OLD");
-        // 非 ENV provider 不回退:passphrase 文件 + KEY_OLD 在场 → 仍 AEAD 失败
+        // 非 ENV provider 不回退:passphrase 文件 + 错误口令(主路径必败)+ KEY_OLD
+        // 在场 → KEY_OLD 不得施救,仍 AEAD 失败(r14 修正:原断言用正确口令,open
+        // 本来就该成功,断言逻辑写反)
         std::env::set_var(ENV_PASSPHRASE, "pp");
         let pb = seal(PROVIDER_PASSPHRASE, "s2", b"y").unwrap();
+        std::env::set_var(ENV_PASSPHRASE, "wrong-pass");
         std::env::set_var("SECRET_VAULT_KEY_OLD", B64.encode([0xA1u8; KEY_LEN]));
         assert!(matches!(open(PROVIDER_PASSPHRASE, "s2", &pb), Err(VaultError::OpenFailed)),
             "fallback must not apply to non-env providers");
