@@ -11,16 +11,18 @@ require secret_vault
 statement ok
 SET secret_vault_provider = 'env';
 
-# 快照一致(刚写入即入快照)→ reload 全零
+# 写入路径采用"擦除失效"语义(WriteSecret 擦除该名状态快照,保守地要求
+# 下次 reload 重校验)→ CREATE 后首扫必计 added=1(HC7-H1 修正:原期望
+# 0|0|0|0 基于错误前提"写入即入快照",首跑实测证伪)
 statement ok
 CREATE PERSISTENT SECRET fd1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'FD-1');
 
 query IIII
 SELECT added, changed, removed, invalid FROM secret_vault_reload();
 ----
-0	0	0	0
+1	0	0	0
 
-# OR REPLACE 使快照失效(WriteSecret 擦除该名状态)→ reload 视为 added 并重校验
+# OR REPLACE 同样擦除失效 → reload 再计 added=1(重校验通过)
 statement ok
 CREATE OR REPLACE PERSISTENT SECRET fd1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'FD-2');
 

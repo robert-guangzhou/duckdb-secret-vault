@@ -439,8 +439,12 @@ void VaultSecretStorage::WriteSecret(const BaseSecret &secret, OnCreateConflict 
 	vault_zeroize_buf(plain, plain_len);
 	// 写入成功后才锁定目录变更(诚实审查 LOW-3:失败不锁定)
 	has_written = true;
-	// reload 变更检测:写入使快照失效(下次 reload 视为新增并重校验)
-	file_states_.erase(name);
+	// reload 变更检测:写入使快照失效(下次 reload 视为新增并重校验)。
+	// HC7-M1:持 rebind_lock——Reload 并发遍历同一 map,无锁擦除是数据竞态
+	{
+		lock_guard<mutex> guard(rebind_lock);
+		file_states_.erase(name);
+	}
 }
 
 void VaultSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_entry_not_found) {
@@ -448,7 +452,11 @@ void VaultSecretStorage::RemoveSecret(const string &name, OnEntryNotFound on_ent
 	string file = fs.JoinPath(vault_path, name + VAULT_FILE_SUFFIX);
 	persistent_secrets.erase(Identifier(name));
 	file_names.erase(Identifier(name));
-	file_states_.erase(name); // reload 变更检测快照同步
+	{
+		// HC7-M1:同 WriteSecret——快照擦除持锁,避免与 Reload 并发竞态
+		lock_guard<mutex> guard(rebind_lock);
+		file_states_.erase(name);
+	}
 	try {
 		fs.RemoveFile(file);
 	} catch (std::exception &ex) {
