@@ -8,7 +8,8 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 > (`secret_vault_migrate/rotate/export/import/status/reload`)+ 一次性封套跨实例转移
 > (stdin 隐藏输码,含重放防护)+ nats_rw 真实联调 + **v1.1 fleet 增强**(热加载/KEY_OLD
 > 轮换过渡)。阶段四文档(THREAT-MODEL/UPDATING/description.yml)已完成;
-> 唯一待办 = GitHub 发布与社区提交(需外网管道)。
+> keyring Windows 运行时已验证(2026-11-06 冒烟四点全 PASS,详见文档);剩余待办 =
+> GitHub 发布与社区提交(需外网管道)+ Windows 平台 CI 构建验证。
 >
 > ## 密钥生成指南(部署前必读)
 >
@@ -65,6 +66,9 @@ DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密
 >   它们不被加载,可安全手动删除(`rm *.tmp-*`)。
 >
 > 设计文档:`../plans/secret-vault-duckdb-extension-plan.md`(r7)
+
+> `vault_test` secret 类型是存储层回归测试 fixture(KV+脱敏),随扩展发布;
+> 生产使用请选 `s3`/`postgres`/`mysql`/`nats_rw` 等真实类型。
 
 ## 构建(minis Docker 模式,与 duckdb-nats-rw 同链路)
 
