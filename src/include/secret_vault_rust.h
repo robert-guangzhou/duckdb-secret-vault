@@ -30,7 +30,7 @@ extern "C" {
 
 #define PROVIDER_ENV 3
 
-#define ENV_FORMAT_VERSION 1
+#define ENV_FORMAT_VERSION 2
 
 #define ENV_HEADER_LEN (((8 + 2) + 2) + 12)
 

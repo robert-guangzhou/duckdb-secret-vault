@@ -6,6 +6,9 @@
 
 require secret_vault
 
+statement ok
+SET secret_vault_provider = 'env';
+
 # Rust core 版本可取（corrosion+cbindgen+staticlib 链路通）
 query T
 SELECT secret_vault_version();
