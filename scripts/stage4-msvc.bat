@@ -3,7 +3,7 @@ REM stage-4: windows_amd64 (MSVC) build + test
 REM Based on ci-environment-experience.md section 3.1
 setlocal enabledelayedexpansion
 
-set REPO=E:\traeworkspace\duckdb\duckdb-secret-vault
+set REPO=E:/traeworkspace\duckdb\duckdb-secret-vault
 set VCVARS=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat
 set VSCMAKE=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin
 set VSNINJA=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja

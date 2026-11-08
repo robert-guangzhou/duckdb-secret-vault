@@ -3,7 +3,7 @@ REM stage-5: windows_amd64_mingw (Rtools42) build + test
 REM Based on ci-environment-experience.md section 3.5
 setlocal enabledelayedexpansion
 
-set REPO=E:\traeworkspace\duckdb\duckdb-secret-vault
+set REPO=E:/traeworkspace\duckdb\duckdb-secret-vault
 set RTOOLS=D:\tools\rtools42\app\x86_64-w64-mingw32.static.posix\bin
 set VSCMAKE=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin
 set VSNINJA=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja

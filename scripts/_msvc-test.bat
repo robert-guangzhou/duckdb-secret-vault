@@ -1,6 +1,6 @@
 @echo off
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
-set REPO=E:\traeworkspace\duckdb\duckdb-secret-vault
+set REPO=E:/traeworkspace\duckdb\duckdb-secret-vault
 set SECRET_VAULT_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==
 set PATH=%REPO%\build\msvc-release\test\unittest\Release;%PATH%
 cd /d %REPO%
