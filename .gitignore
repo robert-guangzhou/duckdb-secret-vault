@@ -6,3 +6,12 @@ target/
 test_output/
 tmp/
 rust/target/
+duckdb/
+build/msvc-release/
+build/mingw-release/
+duckdb/
+build/msvc-release/
+build/mingw-release/
+duckdb/
+build/msvc-release/
+build/mingw-release/
