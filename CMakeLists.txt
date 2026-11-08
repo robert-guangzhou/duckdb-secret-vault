@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.5)
 
 # ---- Rust 核心接线（蓝本：duckdb-nats-rw，源自 ywelsch/duckdb-prql）----
 set(CORROSION_VERBOSE_OUTPUT ON)
+# 显式钉死 CMAKE_SYSTEM_PROCESSOR,防 CI 上 corrosion 自动探测漂移(nats_rw 经验)
+set(CMAKE_SYSTEM_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "" FORCE)
 set(CMAKE_CXX_STANDARD "17" CACHE STRING "C++ standard to enforce")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -86,18 +88,34 @@ add_custom_target(secret_vault_header_check
     COMMENT "secret_vault: checking FFI header freshness (lib.rs vs secret_vault_rust.h)"
     VERBATIM)
 
-build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
+# MSVC 上 static 和 loadable 都生成 .lib,会冲突——只构建 loadable
+# (MinGW 下两者命名不同:lib*_extension.a vs lib*.a,无冲突;来自 nats_rw 经验)
+if(NOT MSVC)
+    build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
+endif()
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-add_dependencies(${EXTENSION_NAME} secret_vault_header_check)
+# 头文件检测先于扩展编译
 add_dependencies(${LOADABLE_EXTENSION_NAME} secret_vault_header_check)
+if(NOT MSVC)
+    add_dependencies(${EXTENSION_NAME} secret_vault_header_check)
+endif()
 
-# staticlib 自含 Rust std：两种目标单文件自足
-target_link_libraries(${EXTENSION_NAME} secret_vault-static)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} secret_vault-static)
+# staticlib 自含 Rust std 与全部依赖
+if(MSVC)
+    # MSVC 上 .lib 在 rust-lib/ 子目录(corrosion 补丁避免与 DLL 导入库同名冲突)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME}
+        ${CMAKE_BINARY_DIR}/extension/${TARGET_NAME}/rust-lib/${TARGET_NAME}.lib
+        userenv ntdll ws2_32 bcrypt)
+else()
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} ${TARGET_NAME}-static)
+    target_link_libraries(${EXTENSION_NAME} ${TARGET_NAME}-static)
+endif()
 
+if(NOT MSVC)
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+endif()
