@@ -106,7 +106,7 @@ if(MSVC)
     # MSVC 上 .lib 在 rust-lib/ 子目录(corrosion 补丁避免与 DLL 导入库同名冲突)
     target_link_libraries(${LOADABLE_EXTENSION_NAME}
         ${CMAKE_BINARY_DIR}/extension/${TARGET_NAME}/rust-lib/${TARGET_NAME}.lib
-        userenv ntdll ws2_32 bcrypt)
+        userenv ntdll ws2_32)
 else()
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ${TARGET_NAME}-static)
     target_link_libraries(${EXTENSION_NAME} ${TARGET_NAME}-static)
