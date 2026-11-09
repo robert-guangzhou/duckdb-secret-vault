@@ -8,8 +8,7 @@ extension:
   maintainers:
     - robert-guangzhou
   requires_toolchains: "rust"
-  # musl 本地已验证通过但保守保留;windows_mingw/linux_arm64/osx 靠 CI 验证
-  excluded_platforms: "linux_amd64_musl;wasm_mvp;wasm_eh;wasm_threads"
+    excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads"
 
 repo:
   github: robert-guangzhou/duckdb-secret-vault
