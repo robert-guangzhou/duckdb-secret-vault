@@ -54,7 +54,7 @@ SET default_secret_storage = 'local_encrypted';
 
 - **env provider**(调度/CI):`export SECRET_VAULT_KEY="$(openssl rand -base64 32)"`
   —— 由调度器凭据存储注入,**禁止**写进脚本/任务定义明文;同用户进程可读
-  `/proc/<pid>/environ` 属已声明威胁边界(见 [THREAT-MODEL](docs/THREAT-MODEL.md))。
+  `/proc/<pid>/environ` 属已声明威胁边界(见 [THREAT-MODEL](docs/THREAT-MODEL.zh-CN.md))。
 - **keyring provider**(工作站默认):无需生成 —— 首次使用自动在 OS 凭据库生成
   256-bit 主密钥;轮换主密钥 = 清除凭据条目 `duckdb.secret_vault/master` 后
   `secret_vault_rotate`(长驻进程缓存主密钥,轮换后需重启进程)。
