@@ -1,15 +1,15 @@
 # duckdb-secret-vault
 
-**中文** · [English](#english) —— 本 README 为中英双语 / This README is bilingual.
+**中文** · [English](#english)
+
+---
+
+## 中文
 
 DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密**存储
 (存储名 `local_encrypted`),替换默认 `local_file` 的明文落盘。
 
-The `secret_vault` DuckDB extension provides **encrypted** local storage
-(storage name `local_encrypted`) for `CREATE PERSISTENT SECRET`, replacing the
-plaintext on-disk format of DuckDB's default `local_file` storage.
-
-## 为什么需要它 | Why
+### 为什么需要它
 
 DuckDB 默认把持久 secret 以**明文二进制**写在 `~/.duckdb/stored_secrets` ——
 磁盘失窃、备份外泄、多用户主机上的其他账号,都可能直接读到你的 S3 key、
@@ -19,57 +19,34 @@ DuckDB 默认把持久 secret 以**明文二进制**写在 `~/.duckdb/stored_sec
 DuckDB 自己的序列化 blob,所以对任意 secret 类型(s3 / mysql / postgres /
 nats_rw / …)都透明生效。
 
-By default DuckDB writes persistent secrets to `~/.duckdb/stored_secrets` as
-**plaintext binary** — disk theft, a leaked backup, or another account on a
-shared host can read your S3 keys, database passwords, or NATS credentials
-directly. This extension registers an alternative storage `local_encrypted`:
-every secret is written as AES-256-GCM ciphertext (per-file random nonce, AEAD
-tag bound to the secret name — rename/tamper fails loudly at decryption), files
-keep 600 permissions, and the encryption key never touches disk. Because it
-encrypts DuckDB's own serialization blob, it works transparently with any
-secret type (s3 / mysql / postgres / nats_rw / ...).
-
-## 当前状态 | Status
+### 当前状态
 
 v1.1 功能齐备:加密存储(keyring/passphrase/env 三种密钥来源)+ 运维函数
 (`secret_vault_migrate/rotate/export/import/status/reload`)+ 一次性加密封套
 跨实例转移(stdin 隐藏输码,含重放防护)+ fleet 增强(热加载 / KEY_OLD 轮换
 过渡)。社区扩展提交准备中。
 
-v1.1 feature-complete: encrypted storage (keyring/passphrase/env key
-providers) + operations functions (`secret_vault_migrate/rotate/export/import/
-status/reload`) + one-time encrypted envelopes for cross-instance transfer
-(hidden stdin code entry, replay protection) + fleet enhancements (hot reload /
-KEY_OLD rotation transition). Community-extension submission in preparation.
-
-## 快速开始 | Quick start
+### 快速开始
 
 ```sql
--- 社区扩展被接受后可用 / available once the community PR is accepted:
--- INSTALL secret_vault FROM community;
-LOAD secret_vault;                         -- dev 构建需按路径 LOAD 并加 -unsigned /
-                                           -- dev builds: LOAD by path, CLI needs -unsigned
+-- 社区扩展被接受后可用:INSTALL secret_vault FROM community;
+LOAD secret_vault;                         -- dev 构建需按路径 LOAD 并加 -unsigned
 
 -- 选择密钥来源:keyring(默认)/ passphrase / env
--- choose where the encryption key lives: keyring (default) | passphrase | env
-SET secret_vault_provider = 'env';         -- 例 / e.g. SECRET_VAULT_KEY 由调度器注入 /
-                                           -- e.g. SECRET_VAULT_KEY injected by your scheduler
+SET secret_vault_provider = 'env';         -- 例:SECRET_VAULT_KEY 由调度器注入
 
 -- 持久 secret 从此以密文落盘(DSVLT 头 + AES-256-GCM)
--- persistent secrets are now written encrypted (DSVLT magic + AES-256-GCM)
 CREATE PERSISTENT SECRET my_s3 IN local_encrypted (
     TYPE s3, KEY_ID 'AKIA...', SECRET 'shhh', REGION 'us-east-1');
 
 -- 新进程自动加载;duckdb_secrets() 照常脱敏
--- fresh processes auto-load; duckdb_secrets() still redacts
 SELECT name, storage, secret_string FROM duckdb_secrets();
 
 -- 也可设为默认存储(无 IN 子句的 CREATE 自动路由到这里)
--- or make it the default storage (CREATE without IN routes here)
 SET default_secret_storage = 'local_encrypted';
 ```
 
-## 密钥来源 | Key providers
+### 密钥来源
 
 | provider | 密钥保管 | 磁盘上出现密钥? |
 |---|---|---|
@@ -77,13 +54,7 @@ SET default_secret_storage = 'local_encrypted';
 | `passphrase` | 使用者记忆;Argon2id(m=64MiB, t=3, p=1)+ per-file 随机 salt 派生 | 否 |
 | `env`(无人值守) | 调度器/CI 按次注入 `SECRET_VAULT_KEY`(base64 32B) | 否(仅进程环境) |
 
-| provider | where the key lives | key on disk? |
-|---|---|---|
-| `keyring` (default) | OS credential store (Windows Credential Manager / macOS Keychain / Linux Secret Service); random 256-bit master key generated on first use | no; on Linux without a Secret Service it errors out instead of silently downgrading |
-| `passphrase` | human memory; derived via Argon2id (m=64MiB, t=3, p=1) with a per-file random salt | no |
-| `env` (unattended) | injected per run by your scheduler/CI as `SECRET_VAULT_KEY` (base64 32B) | no (process env only) |
-
-## 密钥生成指南(部署前必读)| Key generation guide (read before deploying)
+### 密钥生成指南(部署前必读)
 
 - **env provider**(调度/CI):`export SECRET_VAULT_KEY="$(openssl rand -base64 32)"`
   —— 由调度器凭据存储注入,**禁止**写进脚本/任务定义明文;同用户进程可读
@@ -100,6 +71,110 @@ SET default_secret_storage = 'local_encrypted';
   `SECRET_VAULT_KEY_OLD=旧钥` 可继续读旧密文;轮换 runbook:
   ① 全实例部署 {KEY=新, KEY_OLD=旧} 并重启 → ② 发布新密文
   (`secret_vault_rotate` 或目录重写)→ ③ 观察期 → ④ 撤除 KEY_OLD。
+
+### 常用操作
+
+```sql
+LOAD secret_vault;
+SET secret_vault_provider = 'env';              -- 或 keyring(默认)/ passphrase
+CREATE PERSISTENT SECRET s IN local_encrypted (TYPE s3, ...);
+SELECT * FROM secret_vault_status();
+SELECT * FROM secret_vault_migrate();           -- local_file 明文迁入(默认保留源)
+SELECT * FROM secret_vault_rotate(new_provider := 'env');
+SELECT * FROM secret_vault_export('/tmp/b.svb'); -- 一次性码显示于结果行
+SELECT * FROM secret_vault_import('/tmp/b.svb'); -- 默认 stdin 输码(隐藏回显);code := '...' 供自动化(会入 SQL 历史)
+SELECT * FROM secret_vault_reload();             -- 热加载:长驻实例重扫目录(增/改/删对齐,坏文件聚合报告)
+```
+
+### 语义与假设(必读)
+
+- `secret_vault_migrate` 同名冲突默认报错,`on_conflict := 'overwrite'|'skip'`
+  显式选择;源文件须为 600 私有权限。
+- `secret_vault_rotate` 为两遍式:读阶段任一失败不动盘;**写阶段中途失败会
+  留下新旧密钥混合状态**(进程已自动恢复旧 provider 与旧环境密钥)—— 恢复
+  步骤:重新以旧口令/密钥 SET 后再次 rotate。
+- `secret_vault_export` 的信封文件以 600 私有权限落盘(承载全部 secret 明文,
+  仅一次性码保护)。
+- passphrase 的交互提示只在 stdin 为 tty 且未设环境变量时出现,**输入隐藏
+  回显**(v1.1;termios/SetConsoleMode 关闭失败时降级为可见输入并打印
+  WARNING);多连接并发触发提示属未定义行为(单会话设计)。
+- `secret_vault_reload` 前请先关闭正在使用 secret 的活动查询/连接(reload 会
+  整体重建该存储的 catalog;持旧条目引用的活动查询行为未定义)。
+- `secret_vault_provider` 是**进程级全局**设置:任一会话 SET 后对全进程生效,
+  多会话并发设不同值属未定义行为(单会话/单调度进程场景设计)。
+- 存储实例为**单 DatabaseInstance 假设**;同进程 attach 多个数据库并各自
+  LOAD 时,settings 与 status 仅反映最后注册的实例。
+- 环境变量 `SECRET_VAULT_DIRECTORY` 可在 LOAD 前指定存储目录(默认
+  `~/.duckdb/stored_secrets_vault`);运行期变更用
+  `SET secret_vault_directory`(仅空存储状态允许)。
+- 环境变量(`SECRET_VAULT_KEY/PASSPHRASE`)应在进程启动前设置;运行中并发
+  修改 env 与查询属未定义行为(Rust env 非线程安全)。
+- 崩溃/异常可能残留 `<name>.duckdb_secret.vault.tmp-<uuid>` 临时文件:它们
+  不被加载,可安全手动删除(`rm *.tmp-*`)。
+
+### 已知边界
+
+文件损坏(篡改/坏密钥遗留)时 `CREATE OR REPLACE` 会因懒加载失败而报错,
+唯一恢复路径是**手动删除该 secret 文件后重建**(与 local_file 损坏文件语义
+一致)。
+
+---
+
+## English
+
+The `secret_vault` DuckDB extension provides **encrypted** local storage
+(storage name `local_encrypted`) for `CREATE PERSISTENT SECRET`, replacing the
+plaintext on-disk format of DuckDB's default `local_file` storage.
+
+### Why
+
+By default DuckDB writes persistent secrets to `~/.duckdb/stored_secrets` as
+**plaintext binary** — disk theft, a leaked backup, or another account on a
+shared host can read your S3 keys, database passwords, or NATS credentials
+directly. This extension registers an alternative storage `local_encrypted`:
+every secret is written as AES-256-GCM ciphertext (per-file random nonce, AEAD
+tag bound to the secret name — rename/tamper fails loudly at decryption), files
+keep 600 permissions, and the encryption key never touches disk. Because it
+encrypts DuckDB's own serialization blob, it works transparently with any
+secret type (s3 / mysql / postgres / nats_rw / ...).
+
+### Status
+
+v1.1 feature-complete: encrypted storage (keyring/passphrase/env key
+providers) + operations functions (`secret_vault_migrate/rotate/export/import/
+status/reload`) + one-time encrypted envelopes for cross-instance transfer
+(hidden stdin code entry, replay protection) + fleet enhancements (hot reload /
+KEY_OLD rotation transition). Community-extension submission in preparation.
+
+### Quick start
+
+```sql
+-- available once the community PR is accepted: INSTALL secret_vault FROM community;
+LOAD secret_vault;                         -- dev builds: LOAD by path, CLI needs -unsigned
+
+-- choose where the encryption key lives: keyring (default) | passphrase | env
+SET secret_vault_provider = 'env';         -- e.g. SECRET_VAULT_KEY injected by your scheduler
+
+-- persistent secrets are now written encrypted (DSVLT magic + AES-256-GCM)
+CREATE PERSISTENT SECRET my_s3 IN local_encrypted (
+    TYPE s3, KEY_ID 'AKIA...', SECRET 'shhh', REGION 'us-east-1');
+
+-- fresh processes auto-load; duckdb_secrets() still redacts
+SELECT name, storage, secret_string FROM duckdb_secrets();
+
+-- or make it the default storage (CREATE without IN routes here)
+SET default_secret_storage = 'local_encrypted';
+```
+
+### Key providers
+
+| provider | where the key lives | key on disk? |
+|---|---|---|
+| `keyring` (default) | OS credential store (Windows Credential Manager / macOS Keychain / Linux Secret Service); random 256-bit master key generated on first use | no; on Linux without a Secret Service it errors out instead of silently downgrading |
+| `passphrase` | human memory; derived via Argon2id (m=64MiB, t=3, p=1) with a per-file random salt | no |
+| `env` (unattended) | injected per run by your scheduler/CI as `SECRET_VAULT_KEY` (base64 32B) | no (process env only) |
+
+### Key generation guide (read before deploying)
 
 - **env provider** (schedulers/CI): `export SECRET_VAULT_KEY="$(openssl rand
   -base64 32)"` — inject it from the scheduler's credential store; **never**
@@ -126,45 +201,21 @@ SET default_secret_storage = 'local_encrypted';
   restart → ② publish new ciphertext (`secret_vault_rotate` or rewrite the
   directory) → ③ observation window → ④ remove KEY_OLD.
 
-## 常用操作 | Operations
+### Operations
 
 ```sql
 LOAD secret_vault;
-SET secret_vault_provider = 'env';              -- 或 / or: keyring (default) / passphrase
+SET secret_vault_provider = 'env';              -- or keyring (default) / passphrase
 CREATE PERSISTENT SECRET s IN local_encrypted (TYPE s3, ...);
 SELECT * FROM secret_vault_status();
-SELECT * FROM secret_vault_migrate();           -- local_file 明文迁入(默认保留源) / plaintext local_file -> encrypted (source kept by default)
+SELECT * FROM secret_vault_migrate();           -- plaintext local_file -> encrypted (source kept by default)
 SELECT * FROM secret_vault_rotate(new_provider := 'env');
-SELECT * FROM secret_vault_export('/tmp/b.svb'); -- 一次性码显示于结果行 / one-time code shown in the result row
-SELECT * FROM secret_vault_import('/tmp/b.svb'); -- 默认 stdin 输码(隐藏回显);code := '...' 供自动化(会入 SQL 历史) / reads the code from stdin (hidden echo) by default; code := '...' for automation (lands in SQL history)
-SELECT * FROM secret_vault_reload();             -- 热加载:长驻实例重扫目录(增/改/删对齐,坏文件聚合报告) / hot reload: rescan the directory (adds/updates/removes aligned; corrupt files aggregated in one report)
+SELECT * FROM secret_vault_export('/tmp/b.svb'); -- one-time code shown in the result row
+SELECT * FROM secret_vault_import('/tmp/b.svb'); -- reads the code from stdin (hidden echo) by default; code := '...' for automation (lands in SQL history)
+SELECT * FROM secret_vault_reload();             -- hot reload: rescan the directory (adds/updates/removes aligned; corrupt files aggregated in one report)
 ```
 
-## 语义与假设(必读)| Semantics & assumptions (must read)
-
-- `secret_vault_migrate` 同名冲突默认报错,`on_conflict := 'overwrite'|'skip'`
-  显式选择;源文件须为 600 私有权限。
-- `secret_vault_rotate` 为两遍式:读阶段任一失败不动盘;**写阶段中途失败会
-  留下新旧密钥混合状态**(进程已自动恢复旧 provider 与旧环境密钥)—— 恢复
-  步骤:重新以旧口令/密钥 SET 后再次 rotate。
-- `secret_vault_export` 的信封文件以 600 私有权限落盘(承载全部 secret 明文,
-  仅一次性码保护)。
-- passphrase 的交互提示只在 stdin 为 tty 且未设环境变量时出现,**输入隐藏
-  回显**(v1.1;termios/SetConsoleMode 关闭失败时降级为可见输入并打印
-  WARNING);多连接并发触发提示属未定义行为(单会话设计)。
-- `secret_vault_reload` 前请先关闭正在使用 secret 的活动查询/连接(reload 会
-  整体重建该存储的 catalog;持旧条目引用的活动查询行为未定义)。
-- `secret_vault_provider` 是**进程级全局**设置:任一会话 SET 后对全进程生效,
-  多会话并发设不同值属未定义行为(单会话/单调度进程场景设计)。
-- 存储实例为**单 DatabaseInstance 假设**;同进程 attach 多个数据库并各自
-  LOAD 时,settings 与 status 仅反映最后注册的实例。
-- 环境变量 `SECRET_VAULT_DIRECTORY` 可在 LOAD 前指定存储目录(默认
-  `~/.duckdb/stored_secrets_vault`);运行期变更用
-  `SET secret_vault_directory`(仅空存储状态允许)。
-- 环境变量(`SECRET_VAULT_KEY/PASSPHRASE`)应在进程启动前设置;运行中并发
-  修改 env 与查询属未定义行为(Rust env 非线程安全)。
-- 崩溃/异常可能残留 `<name>.duckdb_secret.vault.tmp-<uuid>` 临时文件:它们
-  不被加载,可安全手动删除(`rm *.tmp-*`)。
+### Semantics & assumptions (must read)
 
 - `secret_vault_migrate` errors on a name conflict by default; pass
   `on_conflict := 'overwrite'|'skip'` explicitly. Source files must have 600
@@ -198,95 +249,9 @@ SELECT * FROM secret_vault_reload();             -- 热加载:长驻实例重扫
 - Crashes may leave `<name>.duckdb_secret.vault.tmp-<uuid>` temp files: they
   are never loaded and are safe to delete manually (`rm *.tmp-*`).
 
-## 已知边界 | Known boundary
-
-文件损坏(篡改/坏密钥遗留)时 `CREATE OR REPLACE` 会因懒加载失败而报错,
-唯一恢复路径是**手动删除该 secret 文件后重建**(与 local_file 损坏文件语义
-一致)。
+### Known boundary
 
 If a secret file is corrupted (tampering / leftover from a bad key),
 `CREATE OR REPLACE` fails during lazy loading; the only recovery is to
 **manually delete that secret file and re-create it** (same semantics as a
 corrupted local_file secret).
-
-## 平台验证 | Platform verification
-
-| 平台 | 方式 | SQL 测试 |
-|---|---|---|
-| linux_amd64 | glibc 容器 | 6/6 通过 |
-| linux_amd64_musl | alpine 容器 | 6/6 通过(2026-11-09 于 f68e992 复验,musl 解释器确认) |
-| linux_arm64 | QEMU user-mode 模拟 | 6/6 通过(2026-11-09) |
-| windows_amd64 (MSVC) | 本机 MSVC 2022 | 6/6 通过 |
-| windows_amd64 (MinGW) | Rtools42 | 链接修复已提交;完整验证由社区 CI 覆盖 |
-| osx_amd64 / osx_arm64 | 无 Apple 环境 | 由社区 CI 覆盖 |
-| wasm | — | 排除(Rust staticlib 工具链未验证)|
-
-| platform | how | SQL tests |
-|---|---|---|
-| linux_amd64 | glibc container | 6/6 pass |
-| linux_amd64_musl | alpine container | 6/6 pass (re-verified 2026-11-09 on f68e992; musl interpreter confirmed) |
-| linux_arm64 | QEMU user-mode emulation | 6/6 pass (2026-11-09) |
-| windows_amd64 (MSVC) | local MSVC 2022 | 6/6 pass |
-| windows_amd64 (MinGW) | Rtools42 | link fix landed; full verification via community CI |
-| osx_amd64 / osx_arm64 | no Apple hardware available | via community CI |
-| wasm | — | excluded (Rust staticlib toolchain unverified) |
-
-## 从源码构建 | Build from source
-
-```bash
-# 依赖 / prerequisites: Rust 工具链(stable)+ C++17 工具链 + cmake + ninja
-#                       Rust toolchain (stable) + C++17 toolchain + cmake + ninja
-make release          # 或 / or: make debug, make reldebug
-
-# dev 构建扩展未签名,CLI 须带 -unsigned 才能 LOAD
-# dev-built extensions are unsigned: the CLI needs -unsigned to LOAD them
-./build/release/duckdb -unsigned -c "LOAD 'build/release/extension/secret_vault/secret_vault.duckdb_extension'; SELECT * FROM secret_vault_status();"
-```
-
-## Rust 核心单测 | Rust core unit tests
-
-```bash
-cd rust
-cargo test                                # 单测 + FFI 契约回归 + 固定向量回归 /
-                                           # unit tests + FFI contract regression + fixed-vector regression
-VECTORS_GEN=1 cargo test --test vectors   # 首次生成 tests/vectors.json 后提交 /
-                                           # generate tests/vectors.json once, then commit it
-```
-
-## 文档 | Docs
-
-- [THREAT-MODEL](docs/THREAT-MODEL.md) —— 威胁模型:防护范围 / 明确不防 / 已知
-  残余(双语)。Threat model: in scope, out of scope, known residuals (bilingual).
-- [UPDATING](docs/UPDATING.md) —— DuckDB 版本升级 / repin 流程(双语)。
-  DuckDB upgrade / repin procedure (bilingual).
-- [lessons-2026-10](docs/lessons-2026-10.md) —— 开发期工程教训蒸馏(内部文档,
-  中文)。Distilled engineering lessons from development (internal, Chinese only).
-
-> `vault_test` secret 类型是存储层回归测试 fixture(KV+脱敏),随扩展发布;
-> 生产使用请选 `s3`/`postgres`/`mysql`/`nats_rw` 等真实类型。
->
-> The `vault_test` secret type is a storage-layer regression-test fixture
-> (KV + redaction) shipped with the extension; for production use a real type
-> such as `s3`/`postgres`/`mysql`/`nats_rw`.
-
-License: MIT(见 `description.yml`;顶层 LICENSE 文件待补)。
-License: MIT (see `description.yml`; a top-level LICENSE file is pending).
-
----
-
-# English
-
-各章节均已中文在前、英文在后成对给出,按双语标题导航即可。纯英文概要:本扩展
-为 DuckDB 持久 secret 提供静态 AES-256-GCM 加密(存储 `local_encrypted`),
-密钥来源 keyring/passphrase/env,支持从明文 `local_file` 迁移、整体重加密
-(`rotate`)、一次性加密封套导出/导入(跨实例分发)、长驻实例热加载
-(`reload`),以及 env provider 的 `KEY_OLD` 零停机换钥过渡窗口。
-
-Each section above pairs Chinese and English text (Chinese first, English
-second) — navigate via the bilingual headings. English-only summary: this
-extension gives DuckDB persistent secrets AES-256-GCM encryption at rest
-(storage `local_encrypted`) with keyring/passphrase/env key providers,
-migration from plaintext `local_file`, full re-encryption (`rotate`),
-one-time encrypted envelope export/import for cross-instance distribution,
-hot `reload` for long-lived fleets, and a `KEY_OLD` transition window for
-zero-downtime key rotation on the env provider.
