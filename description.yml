@@ -1,14 +1,14 @@
 extension:
   name: secret_vault
   description: "Encrypted local storage for persistent secrets: a drop-in SecretStorage (local_encrypted) that writes AES-256-GCM ciphertext instead of plaintext, with keyring/passphrase/env key providers, migration, rotation, and one-time-envelope export/import"
-  version: "0.2.0"
+  version: 0.2.0
   language: "C++, Rust"
-  build: "cmake"
-  license: "MIT"
+  build: cmake
+  license: MIT
+  excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads"
+  requires_toolchains: rust
   maintainers:
     - robert-guangzhou
-  requires_toolchains: "rust"
-    excluded_platforms: "wasm_mvp;wasm_eh;wasm_threads"
 
 repo:
   github: robert-guangzhou/duckdb-secret-vault
