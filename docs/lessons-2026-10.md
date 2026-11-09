@@ -1,5 +1,11 @@
 # secret_vault 开发教训(2026-10 会话蒸馏)
 
+> **双语说明 | Note**:本文是内部工程教训日志,正文仅中文(条目含大量与
+> 构建/远端环境绑定的细节,翻译价值低);README 与 THREAT-MODEL/UPDATING
+> 为完整双语。/ This is an internal engineering lessons log, kept in Chinese
+> only (entries are heavily tied to build/remote-environment specifics); the
+> README and THREAT-MODEL/UPDATING are fully bilingual.
+
 > 按全局规则「重复陷阱提升」整理:每条 = 症状 → 根因 → **复用规则**。
 > 来源:阶段零~三实施 + 四轮诚实审查。其中标 ⭐ 的条目直接复用自 duckdb-nats-rw 的
 > `docs/lessons-2026-10.md` / fix-plan,并在本项目实测生效(防复发成功)。
