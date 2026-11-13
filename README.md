@@ -18,6 +18,89 @@ keep 600 permissions, and the encryption key never touches disk. Because it
 encrypts DuckDB's own serialization blob, it works transparently with any
 secret type (s3 / mysql / postgres / nats_rw / ...).
 
+## What's on disk: plaintext vs local_encrypted (real examples)
+
+The same three secrets (postgres / mysql / s3) were created twice with
+identical values — first into DuckDB's default `local_file`, then into
+`local_encrypted`. Below are real `od` hex dumps of the resulting files
+(credentials are throwaway test values). Plaintext sizes → vault sizes grow
+by exactly +56 bytes: 8-byte magic + 2-byte version + 1-byte provider +
+1-byte flags + 16-byte salt + 12-byte nonce + 16-byte AEAD tag.
+
+### postgres
+
+`local_file` `pg_plaintext.duckdb_secret` (488 B) — the password is readable
+by anyone who can read the disk:
+
+```text
+000000  64 00 08 70 6f 73 74 67 72 65 73 65 00 06 63 6f  >d..postgrese..co<
+000010  6e 66 69 67 66 00 0c 70 67 5f 70 6c 61 69 6e 74  >nfigf..pg_plaint<
+...                                                       (KV map region)
+000010  ff ff 65 00 00 66 00 17 50 30 73 74 67 72 65 73  >..e..f..P0stgres<
+000020  2d 53 65 63 72 65 74 2d 50 57 2d 32 30 32 36 ff  >-Secret-PW-2026.<
+        └────────── password in cleartext ──────────────┘
+```
+
+`local_encrypted` `pg_encrypted.duckdb_secret.vault` (544 B) — DSVLT header
++ AES-256-GCM ciphertext, zero credential bytes anywhere in the file:
+
+```text
+000000  44 53 56 4c 54 00 00 00 00 01 03 00 00 00 00 00  >DSVLT...........<
+        └magic┘          └ver┘└pr┘└fl┘└── salt (16B, zeroed for env provider)
+000010  00 00 00 00 00 00 00 00 00 00 00 00 99 45 f7 b9  >.............E..<
+                                            └─ nonce(12B)─┘└── ciphertext ──
+000020  b4 d5 8d d2 47 44 03 70 1f 3d e8 e4 3b 3e 63 10  >....GD.p.=..;>c.<
+...                                                       (ciphertext + tag)
+000220                                                      end of file (tag)
+```
+
+### mysql
+
+`local_file` (433 B): password at file offset 259 in cleartext —
+
+```text
+000010  ff ff 65 00 00 66 00 14 4d 79 53 71 6c 2d 53 65  >..e..f..MySql-Se<
+000020  63 72 65 74 2d 50 57 2d 32 30 32 36 ff ff ff ff  >cret-PW-2026....<
+```
+
+`local_encrypted` (489 B):
+
+```text
+000000  44 53 56 4c 54 00 00 00 00 01 03 00 00 00 00 00  >DSVLT...........<
+000010  00 00 00 00 00 00 00 00 00 00 00 00 bf 55 a6 98  >.............U..<
+000020  ea 9e 27 26 a9 0d 5f 39 4d d6 03 7a c8 c1 25 91  >..'&.._9M..z..%.<
+...ciphertext...
+0001e0  24 01 60 73 90 b5 c3 d2 ca                       >$.`s.....<
+```
+
+### s3 (MinIO-compatible)
+
+`local_file` (494 B) — secret key in cleartext; even the bucket scope is
+plain metadata (`s3://`):
+
+```text
+000000  64 00 02 73 33 65 00 06 63 6f 6e 66 69 67 66 00  >d..s3e..configf.<
+000010  0c 73 33 5f 70 6c 61 69 6e 74 65 78 74 67 00 03  >.s3_plaintextg..<
+000020  05 73 33 3a 2f 2f 06 73 33 6e 3a 2f 2f 06 73 33  >.s3://.s3n://.s3<
+...
+000000  66 00 06 73 65 63 72 65 74 ff ff 64 00 64 00 19  >f..secret..d.d..<
+000010  ff ff 65 00 00 66 00 18 73 33 63 72 33 74 2d 50  >..e..f..s3cr3t-P<
+000020  6c 61 69 6e 74 65 78 74 2d 50 57 2d 32 30 32 36  >laintext-PW-2026<
+```
+
+`local_encrypted` (550 B):
+
+```text
+000000  44 53 56 4c 54 00 00 00 00 01 03 00 00 00 00 00  >DSVLT...........<
+000010  00 00 00 00 00 00 00 00 00 00 00 00 42 ba f5 8b  >............B...<
+000020  fb fe e6 8e c0 b9 eb 0b fb c4 9f 23 65 44 2f f1  >...........#eD/.<
+...ciphertext...
+000220  1e 03 ee fd d2 04                                >......<
+```
+
+String-search check across the six files: each plaintext file contains its
+credential exactly once; the three vault files contain **zero** occurrences.
+
 ## Status
 
 v1.1 feature-complete: encrypted storage (keyring/passphrase/env key
