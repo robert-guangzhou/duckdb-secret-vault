@@ -7,6 +7,8 @@
 
 require secret_vault
 
+require-env SECRET_VAULT_KEY
+
 statement ok
 SET secret_vault_provider = 'env';
 

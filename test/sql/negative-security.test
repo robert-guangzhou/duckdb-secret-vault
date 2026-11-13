@@ -7,6 +7,8 @@
 
 require secret_vault
 
+require-env SECRET_VAULT_KEY
+
 # 非法 provider 名 → 明确报错
 statement error
 SET secret_vault_provider = 'kms';
