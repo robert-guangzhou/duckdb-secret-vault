@@ -9,7 +9,7 @@ require secret_vault
 query T
 SELECT secret_vault_version();
 ----
-0.1.0
+0.2.0
 
 # 存储已注册:status 一行,默认 provider=keyring(默认目录可能尚不存在,files 由目录扫描得出)
 query TT

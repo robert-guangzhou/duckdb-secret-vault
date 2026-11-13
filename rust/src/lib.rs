@@ -469,7 +469,8 @@ pub extern "C" fn vault_zeroize_buf(ptr: *mut u8, len: usize) {
 }
 
 /// Rust core 版本(静态存储,无需释放)。
-static VERSION: &[u8] = b"0.1.0\0";
+// 从 crate 版本派生(2026-11-13:手写字面量与 Cargo.toml 漂移过一轮,0.2.0 bump 未生效)
+static VERSION: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
 #[no_mangle]
 pub extern "C" fn secret_vault_core_version() -> *const c_char {

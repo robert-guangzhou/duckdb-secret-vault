@@ -15,7 +15,7 @@ SET secret_vault_provider = 'env';
 query T
 SELECT secret_vault_version();
 ----
-0.1.0
+0.2.0
 
 # 存储已注册并可显式指定
 statement ok
