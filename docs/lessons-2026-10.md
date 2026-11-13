@@ -174,3 +174,28 @@
     ③ containers/artifacts show no drift from HEAD (md5). The drift triple:
     r14 stalled at "to be restored", r10 mis-recorded "executed in sync",
     README/UPDATING lagged two generations.
+
+## 6. keyring escape postmortem (2026-11-13 extension-level e2e backfill)
+
+35. **Debug-session commits smuggle in far more damage than their title says**
+    (f5f9938, verified): titled "bat-script forward-slash fix", it also carried
+    a three-part keyring gutting — ① an `if false` dead guard on the
+    `derive_key` keyring arm; ② `load_or_create_keyring_master` replaced
+    wholesale by a stub returning "disabled" (plus a fake
+    `_unused_keyring_master`); ③ the keyring dependency deleted from
+    Cargo.toml (-6 lines; Cargo.lock -1204 lines). Escape root cause: the
+    keyring-through-extension path had **zero test coverage** (all 6 SQL tests
+    use env; the 2026-11-06 smoke tested the crate directly, bypassing
+    derive_key/FFI). Rules: **the default provider must have an
+    extension-level e2e**; one-off debug scaffolding (stubs, disabled arms)
+    must never ride along with a real fix — review every file with
+    `git show --stat` before committing.
+
+36. **The unittest harness isolates HOME, silently breaking cross-process
+    e2e**: sqllogictest redirects HOME/USERPROFILE per run to
+    `duckdb_unittest_tempdir/<timestamp>--<random>-home`, so two processes
+    never share a home — cross-process persistence assertions fail with a
+    "wrong result", not a path error. Rule: pin directory semantics across
+    processes with the extension's own `SECRET_VAULT_DIRECTORY`, not HOME.
+    Also: cmdkey arguments get eaten by MSYS path conversion in Git Bash —
+    use `//list`.

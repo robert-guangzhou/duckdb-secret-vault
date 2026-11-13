@@ -143,16 +143,35 @@ fn read_passphrase_hidden(prompt: &str) -> std::io::Result<String> {
 }
 
 fn load_or_create_keyring_master() -> VaultResult<[u8; KEY_LEN]> {
-    Err(VaultError::KeyUnavailable("disabled".into()))
-}
-#[allow(dead_code)]
-fn _unused_keyring_master() -> VaultResult<[u8; KEY_LEN]> {
-    Err(VaultError::KeyUnavailable("disabled".into()))
+    let entry = keyring::Entry::new("duckdb.secret_vault", "master")
+        .map_err(|e| VaultError::KeyUnavailable(format!("keyring: {e}")))?;
+    let master = match entry.get_secret() {
+        Ok(m) => m,
+        Err(keyring::Error::NoEntry) => {
+            // 首次使用:生成并持久化主密钥
+            let mut mk = Zeroizing::new([0u8; KEY_LEN]);
+            OsRng.fill_bytes(&mut *mk);
+            entry
+                .set_secret(&*mk)
+                .map_err(|e| VaultError::KeyUnavailable(format!("keyring set: {e}")))?;
+            mk.to_vec()
+        }
+        Err(e) => return Err(VaultError::KeyUnavailable(format!("keyring: {e}"))),
+    };
+    if master.len() != KEY_LEN {
+        return Err(VaultError::KeyUnavailable(format!(
+            "keyring master key must be {KEY_LEN} bytes, found {}",
+            master.len()
+        )));
+    }
+    let mut key = [0u8; KEY_LEN];
+    key.copy_from_slice(&master);
+    Ok(key)
 }
 
 fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8; KEY_LEN]>> {
     match provider {
-        PROVIDER_KEYRING if false => {
+        PROVIDER_KEYRING => {
             // OS keychain 主密钥(salt 置零,主密钥直接作 AEAD key)。
             // 首次使用自动生成随机 256-bit 主密钥并写入 keychain(Dev Plan 3.3);
             // 无 Secret Service(如 headless Linux)时明确报错,不静默降级(Dev Plan 六)。
@@ -681,6 +700,20 @@ mod tests {
         // 测试用 env provider(不依赖 keychain/口令输入)
         std::env::set_var(ENV_KEY, B64.encode([7u8; KEY_LEN]));
         PROVIDER_ENV
+    }
+
+    #[test]
+    fn keyring_arm_must_be_reachable() {
+        // 回归(f5f9938 引入 `if false` 死分支,扩展层 keyring 全断):
+        // derive_key(PROVIDER_KEYRING) 的结果只允许 Ok(有 keychain)或
+        // KeyUnavailable(headless 无 Secret Service),唯独不允许 BadProvider
+        // —— BadProvider 即分支不可达 = 发布级 bug 再现。
+        let salt = [0u8; SALT_LEN];
+        match derive_key(PROVIDER_KEYRING, &salt) {
+            Ok(_) => {}
+            Err(VaultError::KeyUnavailable(_)) => {}
+            Err(e) => panic!("keyring arm unreachable: {e}"),
+        }
     }
 
     #[test]

@@ -105,3 +105,20 @@
     文件(README 状态块/UPDATING 计数/plan 待办项)与事实一致;②新增测试已执行且
     revisions 落盘;③容器/产物与 HEAD 无漂移(md5)。漂移三连实例:r14 停在"待恢复"、
     r10 误记"同步执行"、README/UPDATING 滞后两代。
+
+## 六、keyring 逃逸复盘(2026-11-13 扩展层 e2e 补测)
+
+35. **排障期 commit 会混入远超标题的破坏面**(f5f9938 实证):标题是"bat 脚本正斜杠修复",
+    实际同时混入 keyring 三件套破坏 —— ① `derive_key` 分支加 `if false` 死守卫;
+    ② `load_or_create_keyring_master` 整体替换为返回 "disabled" 的桩(外加
+    `_unused_keyring_master` 假函数);③ Cargo.toml 删除 keyring 依赖(-6 行,
+    Cargo.lock -1204 行)。逃逸根因:keyring 经扩展的路径**零测试覆盖**(6 个 SQL
+    测试全用 env;11-06 冒烟测的是 crate 直连,绕过 derive_key/FFI)。规则:
+    **默认 provider 必须有扩展层 e2e**;排障/隔离用的一次性改动(桩化、禁用分支)
+    不得与正式修复混提,commit 前 `git show --stat` 逐文件过目。
+
+36. **unittest 框架自带 HOME 隔离,跨进程 e2e 会被静默破坏**:sqllogictest 每次运行
+    把 HOME/USERPROFILE 重定向到 `duckdb_unittest_tempdir/<时间戳>--<随机名>-home`,
+    两个进程的 home 必不相同 → 跨进程持久性断言必失败且报错只在"结果不对"不在
+    "路径不对"。规则:跨进程目录语义用扩展自己的 `SECRET_VAULT_DIRECTORY` 钉住,
+    不依赖 HOME。另:cmdkey 在 Git Bash 下参数会被 MSYS 路径转换吃掉,须 `//list`。
