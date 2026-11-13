@@ -2,7 +2,7 @@ extension:
   name: secret_vault
   description: "Encrypted local storage for persistent secrets: a drop-in SecretStorage (local_encrypted) that writes AES-256-GCM ciphertext instead of plaintext, with keyring/passphrase/env key providers, migration, rotation, and one-time-envelope export/import"
   version: 0.2.0
-  language: "C++, Rust"
+  language: C++
   build: cmake
   license: BSL 1.1
   excluded_platforms: "linux_amd64_musl;osx_amd64;osx_arm64;wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;windows_amd64_rtools"
