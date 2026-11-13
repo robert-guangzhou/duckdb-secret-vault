@@ -161,6 +161,68 @@ SELECT * FROM secret_vault_import('/tmp/b.svb'); -- 默认 stdin 输码(隐藏�
 SELECT * FROM secret_vault_reload();             -- 热加载:长驻实例重扫目录(增/改/删对齐,坏文件聚合报告)
 ```
 
+### 跨实例封套转移完整过程(实测转写)
+
+一次性码如何显示、如何输入、"一次性"到底什么意思 —— 以下为真实抓取的完整
+会话(两个 DuckDB 进程,不同主机、不同密钥体系)。
+
+**实例 A(导出方,env provider)**—— 建两个 secret 后导出:
+
+```sql
+CREATE PERSISTENT SECRET s3_creds IN local_encrypted (TYPE s3, KEY_ID 'AKIAEXAMPLE', SECRET 'shhh-s3-secret', ENDPOINT 'minio.example:9000', REGION 'us-east-1');
+CREATE PERSISTENT SECRET pg_creds IN local_encrypted (TYPE postgres, HOST 'pg.example', DATABASE 'app', USER 'etl', PASSWORD 'shhh-pg-secret');
+SELECT * FROM secret_vault_export('/tmp/b.svb');
+```
+
+一次性传输码**只在结果行显示这一次**,之后再不会出现:
+
+```text
+┌────────────┬──────────────────────────────────────────────────────┬─────────┐
+│    file    │                   transport_code                     │ secrets │
+├────────────┼──────────────────────────────────────────────────────┼─────────┤
+│ /tmp/b.svb │ JTTEWOKCUSKY6VPYV2PN3LW3CFSAJG6VHPLDKZ664WQ4US3B6KJA │       2 │
+└────────────┴──────────────────────────────────────────────────────┴─────────┘
+              52 字符 base32 满熵码 —— 经密码管理器/口头交给导入方;
+              它不在文件里,只在此结果行
+```
+
+把 `/tmp/b.svb` 经任意通道拷给实例 B(文件本身不含明文、不含密钥材料)。
+
+**实例 B(导入方 —— 不同密钥体系:passphrase,无 `SECRET_VAULT_KEY`)**
+执行导入,在提示符处输入/粘贴 52 字符码(真实终端下**输入不回显**):
+
+```text
+$ duckdb -unsigned -c "LOAD secret_vault; SET secret_vault_provider='passphrase';
+                       SELECT * FROM secret_vault_import('/tmp/b.svb');"
+secret_vault: enter transport code: ██████████████████████████   ← 盲输 52 字符后回车
+┌──────────┬─────────┐
+│ imported │ skipped │
+├──────────┼─────────┤
+│        2 │       0 │
+└──────────┴─────────┘
+```
+
+导入的 secret 在 B **立即可用**,且已按 **B 自己的密钥体系重加密**
+(A 用 env、B 用 passphrase;A 的密钥全程不出门):
+
+```text
+SELECT name, storage, secret_string FROM duckdb_secrets();
+pg_creds|local_encrypted|...;password=redacted;user=etl
+s3_creds|local_encrypted|...;secret=redacted;key_id=AKIAEXAMPLE
+```
+
+**"一次性"的真实语义(实测负向)**:
+
+- 在 A 再次导出会封入**新码**,旧包即作废:全新实例 C 用**旧码**导入报
+  `vault open failed: AEAD tag mismatch (wrong key, wrong secret name, or
+  tampered file)`;换**新码**则成功(`imported = 1`)。
+- 导入同名已存在的 secret 报
+  `secret '...' already exists (use on_conflict := 'overwrite' or 'skip')`。
+
+**自动化路径(仅脚本用)**:码可以显式传参 ——
+`SELECT * FROM secret_vault_import('/tmp/b.svb', code := '<52字符>');`
+但注意它会进 SQL 历史;交互场景优先 stdin(`echo "$CODE" | duckdb …`)。
+
 ## 语义与假设(必读)
 
 - `secret_vault_migrate` 同名冲突默认报错,`on_conflict := 'overwrite'|'skip'`

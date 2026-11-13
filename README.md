@@ -178,6 +178,75 @@ SELECT * FROM secret_vault_import('/tmp/b.svb'); -- reads the code from stdin (h
 SELECT * FROM secret_vault_reload();             -- hot reload: rescan the directory (adds/updates/removes aligned; corrupt files aggregated in one report)
 ```
 
+### Envelope transfer, end to end (captured session)
+
+How the one-time code appears, how it is entered, and what one-time really
+means — the transcript below is a real captured session (two DuckDB
+processes on different hosts with different key systems).
+
+**Instance A (exporter, env provider)** — create two secrets, then export:
+
+```sql
+CREATE PERSISTENT SECRET s3_creds IN local_encrypted (TYPE s3, KEY_ID 'AKIAEXAMPLE', SECRET 'shhh-s3-secret', ENDPOINT 'minio.example:9000', REGION 'us-east-1');
+CREATE PERSISTENT SECRET pg_creds IN local_encrypted (TYPE postgres, HOST 'pg.example', DATABASE 'app', USER 'etl', PASSWORD 'shhh-pg-secret');
+SELECT * FROM secret_vault_export('/tmp/b.svb');
+```
+
+The one-time transport code is displayed **once, in the result row** — this
+is the only moment it ever appears:
+
+```text
+┌────────────┬──────────────────────────────────────────────────────┬─────────┐
+│    file    │                   transport_code                     │ secrets │
+├────────────┼──────────────────────────────────────────────────────┼─────────┤
+│ /tmp/b.svb │ JTTEWOKCUSKY6VPYV2PN3LW3CFSAJG6VHPLDKZ664WQ4US3B6KJA │       2 │
+└────────────┴──────────────────────────────────────────────────────┴─────────┘
+              52-char base32, full entropy — hand it over via a password
+              manager or verbally; it is NOT in the file, only this row
+```
+
+Copy `/tmp/b.svb` to instance B over any channel (the file itself contains
+no plaintext and no key material).
+
+**Instance B (importer — different key system: passphrase, no
+`SECRET_VAULT_KEY`)** — run the import and type/paste the code at the
+prompt (echo is hidden on a real terminal):
+
+```text
+$ duckdb -unsigned -c "LOAD secret_vault; SET secret_vault_provider='passphrase';
+                       SELECT * FROM secret_vault_import('/tmp/b.svb');"
+secret_vault: enter transport code: ██████████████████████████   ← typed blind, then Enter
+┌──────────┬─────────┐
+│ imported │ skipped │
+├──────────┼─────────┤
+│        2 │       0 │
+└──────────┴─────────┘
+```
+
+The imported secrets are immediately usable in B and are **re-encrypted
+under B's own key system** (env on A → passphrase on B; A's key never
+travels):
+
+```text
+SELECT name, storage, secret_string FROM duckdb_secrets();
+pg_creds|local_encrypted|...;password=redacted;user=etl
+s3_creds|local_encrypted|...;secret=redacted;key_id=AKIAEXAMPLE
+```
+
+**What "one-time" means (real negative checks):**
+
+- Re-exporting on A seals a **new** code and invalidates the old bundle:
+  a fresh instance C importing with the *old* code fails
+  `vault open failed: AEAD tag mismatch (wrong key, wrong secret name, or
+  tampered file)`; with the *new* code it succeeds (`imported = 1`).
+- Importing secrets that already exist errors with
+  `secret '...' already exists (use on_conflict := 'overwrite' or 'skip')`.
+
+**Automation (scripts only):** the code can be passed explicitly —
+`SELECT * FROM secret_vault_import('/tmp/b.svb', code := '<52 chars>');`
+— but be aware it then lands in SQL history; prefer stdin
+(`echo "$CODE" | duckdb ... `) for anything interactive.
+
 ## Semantics & assumptions (must read)
 
 - `secret_vault_migrate` errors on a name conflict by default; pass
