@@ -48,3 +48,10 @@ statement error
 SET secret_vault_directory = '/tmp/sv-rebind-guard-dir3';
 ----
 cannot change secret_vault_directory
+
+# ---- 清理(测试幂等:固定路径目录须还原为空,否则复跑被 B1 守卫正确拒绝) ----
+statement ok
+DROP PERSISTENT SECRET rg1;
+
+statement ok
+DROP PERSISTENT SECRET rg2;
