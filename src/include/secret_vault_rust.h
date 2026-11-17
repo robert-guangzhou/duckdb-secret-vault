@@ -71,6 +71,8 @@ const char *vault_last_error(void);
 
 /**
  * 释放 vault_seal/vault_open 返回的缓冲。buf.len/buf.cap 必须原样传回,不得篡改。
+ * 契约备注(审计 C4):len==0 但已分配的缓冲会被跳过(不释放)——当前 seal/open
+ * 不可能产出空缓冲,此为防御性契约说明而非可达路径。
  */
 void vault_free_buf(struct VaultBuf buf);
 

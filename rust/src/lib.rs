@@ -137,7 +137,10 @@ fn read_passphrase_hidden(prompt: &str) -> std::io::Result<String> {
             writeln!(stderr)?;
             Ok(line)
         })();
-        SetConsoleMode(h, saved);
+        if SetConsoleMode(h, saved) == 0 {
+            // 审计 C5:恢复失败不静默(echo 保持关闭)
+            eprintln!("WARNING: failed to restore console echo mode");
+        }
         res
     }
 }
@@ -145,8 +148,10 @@ fn read_passphrase_hidden(prompt: &str) -> std::io::Result<String> {
 fn load_or_create_keyring_master() -> VaultResult<[u8; KEY_LEN]> {
     let entry = keyring::Entry::new("duckdb.secret_vault", "master")
         .map_err(|e| VaultError::KeyUnavailable(format!("keyring: {e}")))?;
+    // 审计 C1:主密钥堆副本统一 Zeroizing 收编 —— 此前 get_secret() 的 Vec 与
+    // 首建 mk.to_vec()(把 Zeroizing 打回普通 Vec)均不清零即释放。
     let master = match entry.get_secret() {
-        Ok(m) => m,
+        Ok(m) => Zeroizing::new(m),
         Err(keyring::Error::NoEntry) => {
             // 首次使用:生成并持久化主密钥
             let mut mk = Zeroizing::new([0u8; KEY_LEN]);
@@ -154,7 +159,9 @@ fn load_or_create_keyring_master() -> VaultResult<[u8; KEY_LEN]> {
             entry
                 .set_secret(&*mk)
                 .map_err(|e| VaultError::KeyUnavailable(format!("keyring set: {e}")))?;
-            mk.to_vec()
+            let mut v = Vec::with_capacity(KEY_LEN);
+            v.extend_from_slice(&*mk);
+            Zeroizing::new(v)
         }
         Err(e) => return Err(VaultError::KeyUnavailable(format!("keyring: {e}"))),
     };
@@ -192,26 +199,34 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8;
                     if std::io::stdin().is_terminal() {
                         // tty 无回显(阶段B/r14):termios(Unix)/SetConsoleMode(Windows);
                         // 失败降级为明文回显 + WARNING 行,不静默(计划 3.2)
-                        match read_passphrase_hidden("secret_vault: enter passphrase (input hidden): ") {
-                            Ok(line) => {
-                                if line.trim().is_empty() {
-                                    return Err(VaultError::KeyUnavailable("empty passphrase".into()));
-                                }
-                                Zeroizing::new(line.trim().to_string())
+                    match read_passphrase_hidden("secret_vault: enter passphrase (input hidden): ") {
+                        Ok(mut line) => {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                line.zeroize();
+                                return Err(VaultError::KeyUnavailable("empty passphrase".into()));
                             }
-                            Err(e) => {
-                                eprintln!("WARNING: echo could not be disabled ({e}); input will be visible");
-                                eprint!("secret_vault: enter passphrase: ");
-                                let mut line = String::new();
-                                std::io::stdin()
-                                    .read_line(&mut line)
-                                    .map_err(|e2| VaultError::KeyUnavailable(format!("stdin: {e2}")))?;
-                                if line.trim().is_empty() {
-                                    return Err(VaultError::KeyUnavailable("empty passphrase".into()));
-                                }
-                                Zeroizing::new(line.trim().to_string())
-                            }
+                            let pass = Zeroizing::new(trimmed.to_string());
+                            line.zeroize(); // 审计 C3:输入原文副本
+                            pass
                         }
+                        Err(e) => {
+                            eprintln!("WARNING: echo could not be disabled ({e}); input will be visible");
+                            eprint!("secret_vault: enter passphrase: ");
+                            let mut line = String::new();
+                            std::io::stdin()
+                                .read_line(&mut line)
+                                .map_err(|e2| VaultError::KeyUnavailable(format!("stdin: {e2}")))?;
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                line.zeroize();
+                                return Err(VaultError::KeyUnavailable("empty passphrase".into()));
+                            }
+                            let pass = Zeroizing::new(trimmed.to_string());
+                            line.zeroize(); // 审计 C3
+                            pass
+                        }
+                    }
                     } else {
                         return Err(VaultError::KeyUnavailable(format!(
                             "{ENV_PASSPHRASE} not set and stdin is not interactive"
@@ -229,12 +244,13 @@ fn derive_key(provider: u8, salt: &[u8; SALT_LEN]) -> VaultResult<Zeroizing<[u8;
         }
         PROVIDER_ENV => {
             // base64 编码的 32 字节随机密钥(生成:openssl rand -base64 32)
-            let b64 = std::env::var(ENV_KEY)
+            let mut b64 = std::env::var(ENV_KEY)
                 .map_err(|_| VaultError::KeyUnavailable(format!("{ENV_KEY} not set")))?;
-            let raw = Zeroizing::new(
-                B64.decode(b64.trim())
-                    .map_err(|_| VaultError::BadKeyMaterial(format!("{ENV_KEY} is not valid base64")))?,
-            );
+            let decoded = B64
+                .decode(b64.trim())
+                .map_err(|_| VaultError::BadKeyMaterial(format!("{ENV_KEY} is not valid base64")));
+            b64.zeroize(); // 审计 C2:base64 密钥副本用后即清(成败两路都清)
+            let raw = Zeroizing::new(decoded?);
             if raw.len() != KEY_LEN {
                 return Err(VaultError::BadKeyMaterial(format!(
                     "{ENV_KEY} must decode to {KEY_LEN} bytes, found {}",
@@ -328,11 +344,14 @@ pub fn open(provider: u8, name: &str, blob: &[u8]) -> VaultResult<Vec<u8>> {
         // tag mismatch 时尝试 SECRET_VAULT_KEY_OLD;其他 provider/错误不回退
         // (计划 3.1:避免性能损耗与语义混淆)。回退钥材料用后清零。
         Err(_) if provider == PROVIDER_ENV => {
-            if let Ok(old_b64) = std::env::var("SECRET_VAULT_KEY_OLD") {
-                if let Ok(raw) = B64.decode(old_b64.trim()) {
+            if let Ok(mut old_b64) = std::env::var("SECRET_VAULT_KEY_OLD") {
+                let decoded_old = B64.decode(old_b64.trim());
+                old_b64.zeroize(); // 审计 C2:旧钥 base64 副本
+                if let Ok(mut raw) = decoded_old {
                     if raw.len() == KEY_LEN {
                         let mut old_key = Zeroizing::new([0u8; KEY_LEN]);
                         old_key.copy_from_slice(&raw);
+                        raw.zeroize(); // 审计 C2:decode 中间副本
                         let cipher_old = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&*old_key));
                         if let Ok(pt) =
                             cipher_old.decrypt(nonce, Payload { msg: &blob[HEADER_LEN..], aad: &aad })
@@ -449,6 +468,8 @@ pub extern "C" fn vault_last_error() -> *const c_char {
 }
 
 /// 释放 vault_seal/vault_open 返回的缓冲。buf.len/buf.cap 必须原样传回,不得篡改。
+/// 契约备注(审计 C4):len==0 但已分配的缓冲会被跳过(不释放)——当前 seal/open
+/// 不可能产出空缓冲,此为防御性契约说明而非可达路径。
 #[no_mangle]
 pub extern "C" fn vault_free_buf(buf: VaultBuf) {
     if !buf.ptr.is_null() && buf.len > 0 && buf.cap >= buf.len {
@@ -657,11 +678,12 @@ pub extern "C" fn vault_key_to_base32(key: *const u8, out: *mut c_char, out_len:
         Ok(k) => k,
         Err(_) => return set_last_error_msg("transport key length mismatch"),
     };
-    let code = key_to_base32(&transport);
+    let mut code = key_to_base32(&transport);
     unsafe {
         std::ptr::copy_nonoverlapping(code.as_ptr(), out as *mut u8, code.len());
         *out.add(code.len()) = 0;
     }
+    code.zeroize(); // 审计 C3:码=传输钥等价物,拷出即清
     0
 }
 
