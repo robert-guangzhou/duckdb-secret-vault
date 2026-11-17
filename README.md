@@ -6,6 +6,11 @@ The `secret_vault` DuckDB extension provides **encrypted** local storage
 (storage name `local_encrypted`) for `CREATE PERSISTENT SECRET`, replacing the
 plaintext on-disk format of DuckDB's default `local_file` storage.
 
+> **Intended shape**: a single database instance per process; settings like
+> `secret_vault_provider` are **process-global** (once any session SETs them
+> they apply process-wide). See "Semantics & assumptions" for multi-instance /
+> concurrent-session boundaries.
+
 ## Why
 
 By default DuckDB writes persistent secrets to `~/.duckdb/stored_secrets` as
@@ -128,6 +133,15 @@ SELECT name, storage, secret_string FROM duckdb_secrets();
 -- or make it the default storage (CREATE without IN routes here)
 SET default_secret_storage = 'local_encrypted';
 ```
+
+## Performance profile
+
+- **keyring / env**: key used directly (keyring fetched once per process via
+  OnceLock; measured ~0.24ms/op).
+- **passphrase**: **one full Argon2id derivation per file** (m=64MiB, t=3; the
+  per-file random salt makes caching impossible in principle) — noticeable when
+  opening/reloading many files (order of tens to hundreds of ms per file, not
+  benchmarked). For large fleets prefer keyring/env.
 
 ## Key providers
 

@@ -1,0 +1,50 @@
+# name: test/sql/rebind-guard.test
+# description: 审计 B1/B4 —— RebindDirectory 空态守卫须以 file_states_ 为准(懒加载清空 persistent_secrets 不得绕过);secret_vault_directory 设置存值须为真实路径
+# group: [sql]
+# plan: plans/secret-vault-audit-fixes-round12-test.md — TP-B1a/B1b/B1c/B4
+
+require secret_vault
+
+require-env SECRET_VAULT_KEY
+
+statement ok
+SET secret_vault_provider = 'env';
+
+# ---- TP-B1b/TP-B4:空态放行 + 存值为真实路径(修复前存值是 "ok") ----
+statement ok
+SET secret_vault_directory = '/tmp/sv-rebind-guard-dir';
+
+query I
+SELECT current_setting('secret_vault_directory') LIKE '%sv-rebind-guard-dir%';
+----
+1
+
+query I
+SELECT directory LIKE '%sv-rebind-guard-dir%' FROM secret_vault_status();
+----
+1
+
+# ---- 建密(此后目录锁定) ----
+statement ok
+CREATE PERSISTENT SECRET rg1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'RG-1');
+
+statement ok
+CREATE PERSISTENT SECRET rg2 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'RG-2');
+
+# ---- TP-B1c:写入后切换 → 拒绝(既有行为守卫) ----
+statement error
+SET secret_vault_directory = '/tmp/sv-rebind-guard-dir2';
+----
+cannot change secret_vault_directory
+
+# ---- TP-B1a(核心):强制懒加载擦空 persistent_secrets 后,切换仍须被拒 ----
+# (修复前:守卫只看 persistent_secrets → 被绕过放行;修复后:file_states_ 非空 → 拒绝)
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'local_encrypted' AND persistent;
+----
+2
+
+statement error
+SET secret_vault_directory = '/tmp/sv-rebind-guard-dir3';
+----
+cannot change secret_vault_directory

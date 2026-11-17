@@ -5,6 +5,9 @@
 DuckDB 扩展 `secret_vault`:为 `CREATE PERSISTENT SECRET` 提供本地**加密**存储
 (存储名 `local_encrypted`),替换默认 `local_file` 的明文落盘。
 
+> **适用形态**:单进程单数据库实例;`secret_vault_provider` 等设置为**进程级全局**
+> (任一会话 SET 后全进程生效)。多实例/多会话并发语义见「语义与假设」。
+
 ## 为什么需要它
 
 DuckDB 默认把持久 secret 以**明文二进制**写在 `~/.duckdb/stored_secrets` ——
@@ -120,6 +123,13 @@ SELECT name, storage, secret_string FROM duckdb_secrets();
 -- 也可设为默认存储(无 IN 子句的 CREATE 自动路由到这里)
 SET default_secret_storage = 'local_encrypted';
 ```
+
+## 性能特征
+
+- **keyring / env**:密钥直接使用(keyring 经 OnceLock 每进程取一次,实测 ~0.24ms/op)。
+- **passphrase**:**每文件一次完整 Argon2id 派生**(m=64MiB、t=3;per-file 随机 salt 所致,
+  缓存在原理上不可能)——文件数大时逐次打开/重载的开销可感知(量级为每文件几十至
+  上百毫秒,未实测标定)。大批量场景建议 keyring/env。
 
 ## 密钥来源
 

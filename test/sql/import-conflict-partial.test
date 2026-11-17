@@ -1,0 +1,54 @@
+# name: test/sql/import-conflict-partial.test
+# description: 审计 A5 —— import on_conflict=error 中途冲突须披露"冲突前已导入 N 条"(部分导入可见性)
+# group: [sql]
+# plan: plans/secret-vault-audit-fixes-round12-test.md — TP-A5a/A5b/A5c
+
+require secret_vault
+
+require-env SECRET_VAULT_KEY
+
+statement ok
+SET secret_vault_provider = 'env';
+
+# 建两个 secret 并导出双条目封套(确定性码,见 export-import.test 同款)
+statement ok
+CREATE PERSISTENT SECRET ipc1 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'IPC-1');
+
+statement ok
+CREATE PERSISTENT SECRET ipc2 IN local_encrypted (TYPE vault_test, URL 'u', USER 'u', PASSWORD 'IPC-2');
+
+query I
+SELECT secrets FROM secret_vault_export('/tmp/sv-partial.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA');
+----
+2
+
+# 制造"第二条目冲突":删掉第一条,保留第二条 → 导入时 ipc1 先落盘,ipc2 撞名
+statement ok
+DROP PERSISTENT SECRET ipc1;
+
+# ---- TP-A5a(核心):冲突错误须披露已导入条数(修复前无此句 → 红) ----
+statement error
+SELECT * FROM secret_vault_import('/tmp/sv-partial.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA');
+----
+already imported 1
+
+# ---- TP-A5c:前序条目确实已落盘(错误路径不触发热加载,以 reload 见盘上事实;
+# 本会话的 create/drop/import 写路径均使快照失效,故 ipc1+ipc2 同计 added) ----
+query I
+SELECT added FROM secret_vault_reload();
+----
+2
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE name = 'ipc1' AND storage = 'local_encrypted';
+----
+1
+
+# ---- TP-A5b(对照):skip 模式逐条跳过,无部分导入歧义 ----
+statement ok
+DROP PERSISTENT SECRET ipc1;
+
+query II
+SELECT imported, skipped FROM secret_vault_import('/tmp/sv-partial.svb', code := 'IJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBA', on_conflict := 'skip');
+----
+1	1

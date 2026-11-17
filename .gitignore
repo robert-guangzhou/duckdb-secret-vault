@@ -15,3 +15,4 @@ build/mingw-release/
 duckdb/
 build/msvc-release/
 build/mingw-release/
+duckdb_unittest_tempdir/

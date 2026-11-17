@@ -48,8 +48,10 @@ cost but is no substitute for entropy).
 4. **Forgotten passphrase**: no backdoor (a backdoor is a leak surface); the
    files are permanently unrecoverable.
 5. **Same-user side channels**: stdin code entry has hidden echo (v1.1);
-   leaking the one-time code via clipboard/chat history is an operational
-   risk — hand it over through a password manager.
+   leaking the one-time code via clipboard/chat history/**terminal
+   recorders** (tmux capture, asciinema, shell transcripts) is an operational
+   risk — hand it over through a password manager, and disable session
+   recording before typing the code interactively.
 
 ## Known residuals (honesty statement)
 

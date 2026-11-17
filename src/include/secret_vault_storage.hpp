@@ -47,9 +47,13 @@ string VaultLastError();
 
 //! VaultBuf RAII 守卫(全面 review CR-H1/H2 修复):析构 = zeroize + 按契约释放,
 //! 正常与异常路径均不泄漏、明文不留残留。storage 与 functions 共用。
+//! (审计 B2:禁拷贝 —— 双 free 守卫,对齐 ZeroizingMemoryStream)
 struct VaultBufGuard {
+	VaultBufGuard() = default;
 	VaultBuf buf {nullptr, 0, 0};
 	~VaultBufGuard();
+	VaultBufGuard(const VaultBufGuard &) = delete;
+	VaultBufGuard &operator=(const VaultBufGuard &) = delete;
 };
 
 //! CR-H3(r13)彻底方案:清零型内存写流。扩容时旧缓冲先清零再释放,
@@ -94,6 +98,60 @@ private:
 	idx_t capacity_;
 	idx_t pos_ = 0;
 	data_t *data_;
+};
+
+//! 审计 A1/A2/A3 根因封装:明文/密钥码的字符串载体。析构即清零 ——
+//! "逐路径手工补 vault_zeroize"漏一条就逃逸(A1/A2/A3 为第五次同类),
+//! 改由类型系统统一兜底(正常与异常路径均覆盖)。拷贝禁用,移动后源失活。
+class ZeroizingString {
+public:
+	ZeroizingString() = default;
+	ZeroizingString(string s_p) : s_(std::move(s_p)) { // NOLINT(隐式:string → 载体)
+	}
+	~ZeroizingString() {
+		Clear();
+	}
+	ZeroizingString(const ZeroizingString &) = delete;
+	ZeroizingString &operator=(const ZeroizingString &) = delete;
+	ZeroizingString(ZeroizingString &&other) noexcept : s_(std::move(other.s_)) {
+		other.s_.clear();
+	}
+	ZeroizingString &operator=(ZeroizingString &&other) noexcept {
+		if (this != &other) {
+			Clear();
+			s_ = std::move(other.s_);
+			other.s_.clear();
+		}
+		return *this;
+	}
+
+	const char *data() const {
+		return s_.data();
+	}
+	idx_t size() const {
+		return s_.size();
+	}
+	bool empty() const {
+		return s_.empty();
+	}
+	const string &str() const {
+		return s_;
+	}
+	//! 从裸缓冲赋值(DecodePayload 用)
+	void Assign(const char *p, idx_t n) {
+		Clear();
+		s_.assign(p, n);
+	}
+	//! 清零已写入区(std::string 增长只搬移 [0,size),slack 不含敏感字节)
+	void Clear() {
+		if (!s_.empty()) {
+			std::memset(&s_[0], 0, s_.size());
+		}
+		s_.clear();
+	}
+
+private:
+	string s_;
 };
 
 //! 公共助手(P3-L2 去重:storage 与 functions 共用同一实现)

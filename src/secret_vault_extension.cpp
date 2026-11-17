@@ -84,7 +84,8 @@ static void SecretVaultDirectorySetting(ClientContext &context, SetScope scope, 
 		throw InvalidInputException("secret_vault: storage not initialized");
 	}
 	storage->RebindDirectory(parameter.ToString());
-	parameter = Value("ok");
+	// 审计 B4:存真实路径(此前存 "ok",current_setting 无法回读目录)
+	parameter = Value(storage->PublicDirectory());
 }
 
 // ---- secret_vault_status() 表函数 ----
@@ -155,7 +156,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// settings(经 DBConfig::AddExtensionOption;SET/RESET/duckdb_settings 可见)
 	config.AddExtensionOption("secret_vault_provider",
-	                          "Key provider for the local_encrypted secret storage: keyring | passphrase | env",
+	                          "Key provider for the local_encrypted secret storage: keyring | passphrase | env "
+	                          "(process-global: affects the whole process, not just this session)",
 	                          LogicalType::VARCHAR, Value("keyring"), SecretVaultProviderSetting, SetScope::SESSION);
 	config.AddExtensionOption("secret_vault_directory",
 	                          "Directory for local_encrypted secret files (changeable only while storage is empty)",

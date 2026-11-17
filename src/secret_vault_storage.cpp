@@ -89,7 +89,9 @@ void VaultWriteEncryptedFile(FileSystem &fs, const string &dir, const string &na
 	fs.CreateDirectoriesRecursive(dir);
 	string file_path = fs.JoinPath(dir, name + VAULT_FILE_SUFFIX);
 	string temp_path = file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
-	fs.TryRemoveFile(file_path);
+	// 审计 R1:不预删正式文件 —— DuckDB MoveFile 两平台均原子替换已存在目标
+	// (POSIX rename / Windows FileRenameInfoEx+MOVEFILE_REPLACE_EXISTING),
+	// 预删只会制造"旧文件已删、tmp 未就位"的崩溃丢失窗口。
 	fs.TryRemoveFile(temp_path);
 	{
 		auto flags = FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_PRIVATE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW;
@@ -293,7 +295,9 @@ string VaultSecretStorage::DefaultVaultPath(DatabaseInstance &db) {
 
 void VaultSecretStorage::RebindDirectory(const string &new_path) {
 	lock_guard<mutex> guard(rebind_lock);
-	if (has_written || !persistent_secrets.empty()) {
+	// 审计 B1:以 file_states_ 为空态准绳 —— 懒加载会逐个擦空 persistent_secrets
+	// 且不置 has_written,原判据可被"全部读一遍"绕过(磁盘明明有文件仍放行切换)。
+	if (has_written || !file_states_.empty()) {
 		throw InvalidInputException(
 		    "secret_vault: cannot change secret_vault_directory after secrets exist in '%s'; restart with the new "
 		    "directory instead",

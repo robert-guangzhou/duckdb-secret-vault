@@ -102,13 +102,13 @@ static uint32_t ReadU32(const char *&p, const char *end) {
 
 struct EnvelopeEntry {
 	string name;
-	string plaintext;
+	ZeroizingString plaintext; // 审计 A2:明文载体,析构即清(读阶段中途抛出也不残留)
 	int64_t mtime = 0; // v1.1:源文件 mtime(DuckDB timestamp_t,Unix µs),重放判定用
 };
 
 // CR-H3:payload 含明文,先按精确总长 reserve 再拼,杜绝 std::string 扩容
-// 在堆上遗留明文中间副本
-static string EncodePayload(const vector<EnvelopeEntry> &entries) {
+// 在堆上遗留明文中间副本;返回值为清零型载体(审计 A2:seal 失败路径同样不残留)
+static ZeroizingString EncodePayload(const vector<EnvelopeEntry> &entries) {
 	size_t total = 4;
 	for (auto &e : entries) {
 		total += 4 + e.name.size() + 8 + 4 + e.plaintext.size();
@@ -121,9 +121,9 @@ static string EncodePayload(const vector<EnvelopeEntry> &entries) {
 		buf.append(e.name);
 		AppendU64(buf, static_cast<uint64_t>(e.mtime));
 		AppendU32(buf, static_cast<uint32_t>(e.plaintext.size()));
-		buf.append(e.plaintext);
+		buf.append(e.plaintext.str());
 	}
-	return buf;
+	return ZeroizingString(std::move(buf));
 }
 
 static vector<EnvelopeEntry> DecodePayload(const string &payload) {
@@ -145,7 +145,7 @@ static vector<EnvelopeEntry> DecodePayload(const string &payload) {
 		if (p + plen > end) {
 			throw SerializationException("secret_vault: malformed envelope payload (truncated plaintext)");
 		}
-		e.plaintext.assign(p, plen);
+		e.plaintext.Assign(p, plen);
 		p += plen;
 		entries.push_back(std::move(e));
 	}
@@ -227,12 +227,19 @@ static void MigrateExecute(ClientContext &context, TableFunctionInput &data, Dat
 				    name, storage->PublicDirectory());
 			}
 		}
-		string plaintext;
-		if (!ReadWholeFile(fs, src_path, plaintext)) {
-			continue;
+		ZeroizingString plaintext;
+		{
+			string raw;
+			if (!ReadWholeFile(fs, src_path, raw)) {
+				// 审计 A4:list 与 read 之间源文件消失不再静默跳过(既不计 migrated
+				// 也不计 skipped 的暗漏)—— 抛错让操作者知情,与"不静默"原则一致
+				throw IOException("secret_vault_migrate: source file '%s' vanished during migration; "
+				                  "another process may be operating on the directory",
+				                  src_path);
+			}
+			plaintext = ZeroizingString(std::move(raw)); // 实施中发现:A1 同类第四站点(写失败漏清)
 		}
 		VaultWriteEncryptedFile(fs, storage->PublicDirectory(), name, plaintext.data(), plaintext.size());
-		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(plaintext.data()), plaintext.size());
 		if (bind.delete_source) {
 			fs.RemoveFile(src_path);
 		}
@@ -303,7 +310,9 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 	}
 
 	// 第一遍:全部用旧 provider 解密(任何失败即中止,不写任何文件)
-	vector<string> plaintexts;
+	// 审计 A1:载体换 ZeroizingString —— 读阶段中途抛出时已解密内容析构即清,
+	// 不再依赖调用方逐路径手工补 vault_zeroize(此前该路径逃逸)。
+	vector<ZeroizingString> plaintexts;
 	plaintexts.reserve(names.size());
 	for (auto &n : names) {
 		plaintexts.push_back(VaultReadDecryptedFile(fs, fs.JoinPath(dir, n + VAULT_FILE_SUFFIX), n));
@@ -367,18 +376,13 @@ static void RotateExecute(ClientContext &context, TableFunctionInput &data, Data
 	try {
 		for (idx_t i = 0; i < names.size(); i++) {
 			VaultWriteEncryptedFile(fs, dir, names[i], plaintexts[i].data(), plaintexts[i].size());
-			// 卫生:明文副本即用即清
-			auto *p = reinterpret_cast<data_ptr_t>(plaintexts[i].data());
-			vault_zeroize_buf(p, plaintexts[i].size());
 			rotated++;
 		}
 	} catch (std::exception &) {
 		SetVaultProviderGlobal(old_provider);
 		restore_env();
-		// 卫生:失败路径剩余明文与新密钥材料也清零(P3-M3/HC2-M2)
-		for (auto &pt : plaintexts) {
-			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(pt.data()), pt.size());
-		}
+		// 卫生:失败路径新密钥材料清零(P3-M3/HC2-M2;明文载体已由
+		// ZeroizingString 析构兜底)
 		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.new_passphrase.data())),
 		                  bind.new_passphrase.size());
 		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.new_key.data())), bind.new_key.size());
@@ -488,14 +492,14 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 		string path = fs.JoinPath(dir, n + VAULT_FILE_SUFFIX);
 		EnvelopeEntry e;
 		e.name = n;
-		e.plaintext = VaultReadDecryptedFile(fs, path, n);
+		e.plaintext = ZeroizingString(VaultReadDecryptedFile(fs, path, n));
 		{
 			auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
 			e.mtime = static_cast<int64_t>(fs.GetLastModifiedTime(*handle).value); // timestamp_t.value = Unix µs
 		}
 		entries.push_back(std::move(e));
 	}
-	string payload = EncodePayload(entries);
+	ZeroizingString payload = EncodePayload(entries);
 
 	// transport key:参数提供(自动化)或现场生成;封套加密写文件
 	uint8_t transport[32];
@@ -541,10 +545,8 @@ static void ExportExecute(ClientContext &context, TableFunctionInput &data, Data
 		writer.WriteData(envelope.buf.ptr, envelope.buf.len);
 		writer.Flush();
 	}
-	vault_zeroize_buf(reinterpret_cast<data_ptr_t>(payload.data()), payload.size());
-	for (auto &e : entries) {
-		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
-	}
+	// 卫生:payload 与各条目明文由 ZeroizingString 析构统一清零(审计 A2:
+	// 此前成功路径手工清、读/seal 阶段抛出路径漏清)
 
 	// 一次性码仅在结果行出现(查询输出即"显示一次");生成码之后才清 transport
 	char code_buf[64] = {0};
@@ -610,19 +612,24 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 		if (vault_base32_to_key(bind.code.c_str(), transport) != 0) {
 			throw InvalidInputException("secret_vault_import: %s", VaultLastError());
 		}
+		// 审计 A3:码等价于信封密钥,转换成功后即清(对齐 export 的 P3-M3 处置)
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(const_cast<char *>(bind.code.data())), bind.code.size());
 	} else {
 		fprintf(stderr, "secret_vault: enter transport code: ");
 		fflush(stderr);
-		char line[256];
+		char line[256] = {0};
 		if (!fgets(line, sizeof(line), stdin) || line[0] == '\n' || line[0] == '\0') {
-			throw InvalidInputException(
-			    "secret_vault_import: no code on stdin; pipe it or pass code := '...' (automation, 会入 SQL 历史)");
+			throw InvalidInputException("secret_vault_import: no code on stdin; pipe it or pass code := '...' "
+			                            "(automation; note: it will be recorded in SQL history)");
 		}
 		string code(line);
 		code.erase(code.find_last_not_of(" \r\n\t") + 1);
 		if (vault_base32_to_key(code.c_str(), transport) != 0) {
+			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(line), sizeof(line)); // 审计 A3:栈残留同清
 			throw InvalidInputException("secret_vault_import: %s", VaultLastError());
 		}
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(code.data()), code.size());
+		vault_zeroize_buf(reinterpret_cast<data_ptr_t>(line), sizeof(line));
 	}
 
 	string envelope;
@@ -647,14 +654,14 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 			bool exists = fs.FileExists(target);
 			if (exists && bind.on_conflict == "skip") {
 				skipped++;
-				vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
 				continue;
 			}
 			if (exists && bind.on_conflict == "error") {
+				// 审计 A5:部分导入须披露 —— 冲突抛出前已有 imported 条落盘
 				throw InvalidInputException(
 				    "secret_vault_import: secret '%s' already exists in '%s' (use on_conflict := 'overwrite' or "
-				    "'skip')",
-				    e.name, dir);
+				    "'skip'; already imported %llu secret(s) before this conflict)",
+				    e.name, dir, static_cast<unsigned long long>(imported));
 			}
 			// v1.1 重放防护:现存文件较新而包内条目较旧 → 默认拒绝(仅对"已存在"
 			// 条目可判;新条目无时间参照)。allow_older := true 显式放行。
@@ -672,14 +679,11 @@ static void ImportExecute(ClientContext &context, TableFunctionInput &data, Data
 				}
 			}
 			VaultWriteEncryptedFile(fs, dir, e.name, e.plaintext.data(), e.plaintext.size());
-			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
 			imported++;
 		}
 	} catch (std::exception &) {
-		// 卫生:异常路径清零全部条目明文(HC2-M2;已清条目重复清零无害)
-		for (auto &e : entries) {
-			vault_zeroize_buf(reinterpret_cast<data_ptr_t>(e.plaintext.data()), e.plaintext.size());
-		}
+		// 卫生:条目明文由 ZeroizingString 析构统一清零(HC2-M2 原语义保留,
+		// 手工逐条补清已由载体类型兜底)
 		throw;
 	}
 	// v1.1 阶段C(r14):import 后即时热加载(复用阶段A Reload 重建机制,
