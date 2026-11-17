@@ -100,8 +100,10 @@ fn read_passphrase_hidden(prompt: &str) -> std::io::Result<String> {
         writeln!(stderr)?; // 回显关闭时补换行
         Ok(line)
     })();
-    // 无论读成败都恢复原 termios(guard 语义)
-    unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
+    // 无论读成败都恢复原 termios(guard 语义;恢复失败不静默 —— C5 的 unix 对称面)
+    if unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) } != 0 {
+        eprintln!("WARNING: failed to restore terminal echo settings");
+    }
     read_result
 }
 
